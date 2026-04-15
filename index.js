@@ -70,4 +70,4 @@ app.post('/api/apply', upload.array('id_photos', 2), (req, res) => {
     });
 });
 
-app.listen(3001, () => console.log('Gateway running on port 3000'));
+app.listen(3001, () => console.log('Gateway running on port 3001'));
