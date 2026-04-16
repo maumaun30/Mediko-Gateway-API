@@ -196,8 +196,18 @@ app.post(
   submitLimiter,
   upload.array("id_photos", 2),
   (req, res) => {
+    // Capture metadata
+    const metadata = JSON.stringify({
+      ip: req.ip,
+      user_agent: req.get("User-Agent"),
+      referer: req.get("Referer") || "Direct",
+      origin: req.get("Origin") || "Unknown",
+      language: req.get("Accept-Language"),
+    });
+
     const { full_name, birthday, contact_number, email_address, id_number } =
       req.body;
+
     const now = Date.now();
     const formLoadedAt = parseInt(req.body.form_loaded_at, 10);
 
@@ -243,9 +253,10 @@ app.post(
     // 4. Cooldown — prevent duplicate submissions from same email
     const cooldownSql = `
       SELECT id FROM applications
-      WHERE email_address = ? AND id_number = ?
-      AND created_at > NOW() - INTERVAL 2 MINUTE
-      LIMIT 1
+      WHERE email_address = ? 
+        AND id_number = ?
+        AND created_at > DATE_SUB(NOW(), INTERVAL 2 MINUTE)
+      LIMIT 1;
     `;
 
     db.query(cooldownSql, [email_address], (err, rows) => {
@@ -255,8 +266,6 @@ app.post(
       }
 
       if (rows.length > 0) {
-        // If they just submitted this EXACT same info, don't error out.
-        // Just tell them it's already received so they don't panic.
         log("info", "duplicate_ignored", { email: email_address });
         return res.status(200).json({
           success: true,
@@ -266,23 +275,26 @@ app.post(
       }
 
       // 5. Insert
-      const photoPaths = req.files.map((f) => f.path).join(",");
+      const photoPaths = req.files
+        ? req.files.map((f) => f.path).join(",")
+        : "";
 
       const insertSql = `
-      INSERT INTO applications
-        (full_name, birthday, contact_number, email_address, id_number, id_photo_path)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO applications 
+        (full_name, birthday, contact_number, email_address, id_number, id_photo_path, metadata) 
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `;
 
       db.query(
         insertSql,
         [
-          full_name.trim(),
+          full_name,
           birthday,
-          contact_number.trim(),
-          email_address.trim(),
-          id_number.trim(),
+          contact_number,
+          email_address,
+          id_number,
           photoPaths,
+          metadata,
         ],
         (err, result) => {
           if (err) {
