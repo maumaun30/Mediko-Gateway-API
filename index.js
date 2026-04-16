@@ -125,7 +125,6 @@ transporter.verify((err) => {
 
 // Helper: send email and log result
 async function sendApplicationEmails(application, reqFiles, metadataStr) {
-  // Changed argument name to reqFiles
   const {
     full_name,
     email_address,
@@ -137,12 +136,13 @@ async function sendApplicationEmails(application, reqFiles, metadataStr) {
 
   let meta = {};
   try {
-    meta = JSON.parse(metadataStr);
+    // metadataStr must match what is passed in the call
+    meta =
+      typeof metadataStr === "string" ? JSON.parse(metadataStr) : metadataStr;
   } catch (e) {
     meta = { error: "Could not parse metadata" };
   }
 
-  // Map the multer files to nodemailer attachments
   const attachments = reqFiles
     ? reqFiles.map((f) => ({
         filename: f.originalname,
@@ -150,7 +150,6 @@ async function sendApplicationEmails(application, reqFiles, metadataStr) {
       }))
     : [];
 
-  // 1. Confirmation to the applicant
   const applicantMail = {
     from: `"Mediko.ph" <${process.env.MAIL_FROM}>`,
     to: email_address,
@@ -158,23 +157,17 @@ async function sendApplicationEmails(application, reqFiles, metadataStr) {
     html: `
       <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
         <h2 style="color: #2c3e50;">Hello ${full_name},</h2>
-        <p>We have successfully received your application for the Senior Citizen / PWD discount.</p>
+        <p>We have received your application for the Senior Citizen / PWD discount.</p>
         
         <div style="background-color: #f8f9fa; padding: 15px; border-left: 4px solid #005a9c; margin: 20px 0;">
           <strong>What happens next?</strong><br>
-          Please wait for a Mediko representative to reach out to you. We may contact you via:
-          <ul>
-            <li><strong>Email:</strong> To send your unique discount code.</li>
-            <li><strong>SMS/Call:</strong> If we need clarification regarding your uploaded ID.</li>
-          </ul>
+          Please wait for a Mediko representative to reach out to you via Email, SMS, or Call.
           <p>Standard processing time is <strong>3 to 5 business days</strong>.</p>
         </div>
 
         <p><strong>Application Details:</strong><br>
         ID Number: ${id_number}<br>
-        Reference ID: #$${insertId}</p>
-
-        <p>Stay healthy!<br><strong>Mediko.ph Team</strong></p>
+        Reference ID: #${insertId}</p> <p>Stay healthy!<br><strong>Mediko.ph Team</strong></p>
       </div>
     `,
   };
@@ -190,8 +183,6 @@ async function sendApplicationEmails(application, reqFiles, metadataStr) {
     attachments: attachments,
     html: `
       <h3 style="color: #2c3e50;">New discount application received</h3>
-      
-      <h4 style="margin-bottom: 5px;">Applicant Details:</h4>
       <table border="1" style="border-collapse: collapse; width: 100%; max-width: 600px; font-family: sans-serif;">
         <tr style="background-color: #f8f9fa;"><td style="padding: 8px; width: 150px;"><strong>App ID</strong></td><td style="padding: 8px;">#${insertId}</td></tr>
         <tr><td style="padding: 8px;"><strong>Name</strong></td><td style="padding: 8px;">${full_name}</td></tr>
@@ -208,8 +199,6 @@ async function sendApplicationEmails(application, reqFiles, metadataStr) {
         <tr><td style="padding: 6px;"><strong>Browser Agent</strong></td><td style="padding: 6px;">${meta.user_agent || "N/A"}</td></tr>
         <tr><td style="padding: 6px;"><strong>Referer</strong></td><td style="padding: 6px;">${meta.referer || "N/A"}</td></tr>
       </table>
-
-      <p style="margin-top: 20px;"><em>ID photos are attached to this email as files.</em></p>
     `,
   };
 
@@ -361,8 +350,16 @@ app.post(
 
           // Send emails in the background
           sendApplicationEmails(
-            { full_name, email_address, id_number, insertId: result.insertId },
+            {
+              full_name,
+              email_address,
+              id_number,
+              birthday,
+              contact_number,
+              insertId: result.insertId,
+            },
             req.files,
+            metadata,
           );
         },
       );
