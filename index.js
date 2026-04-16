@@ -422,6 +422,13 @@ app.get("/api/submissions", (req, res) => {
   );
 });
 
+app.use('/admin-dashboard', express.static(path.join(__dirname, 'admin-portal')));
+
+app.use((req, res, next) => {
+  res.setHeader("Content-Security-Policy", "frame-ancestors https://*.myshopify.com https://admin.shopify.com;");
+  next();
+});
+
 // ── Global error handler ──────────────────────────────────────────────────────
 app.use((err, req, res, _next) => {
   log("error", "unhandled_error", { message: err.message, path: req.path });
