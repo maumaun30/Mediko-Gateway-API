@@ -427,10 +427,39 @@ app.get("/api/submissions", (req, res) => {
   );
 });
 
-app.use(
-  "/admin-dashboard",
-  express.static(path.join(__dirname, "admin-portal")),
-);
+// ── Shopify App Bridge Auth ───────────────────────────────────────────────────
+app.post("/api/auth/shopify", express.json(), async (req, res) => {
+  try {
+    const { shopOrigin, sessionToken } = req.body;
+    
+    // Verify Shopify session (your Shopify app must validate this)
+    const shopifyAuth = await verifyShopifySession(sessionToken, shopOrigin);
+    
+    if (!shopifyAuth.valid) {
+      return res.status(401).json({ error: "Invalid Shopify session" });
+    }
+    
+    // Generate short-lived JWT for dashboard
+    const dashboardToken = jwt.sign(
+      { shopOrigin, admin: true, exp: Math.floor(Date.now() / 1000) + (60 * 60) }, // 1hr
+      process.env.DASHBOARD_JWT_SECRET
+    );
+    
+    res.json({ token: dashboardToken });
+  } catch (err) {
+    log("error", "shopify_auth_failed", { message: err.message });
+    res.status(401).json({ error: "Auth failed" });
+  }
+});
+
+app.use("/admin-dashboard", (req, res, next) => {
+  // Block direct access to index.html
+  if (req.path === '/index.html' || req.path === '/') {
+    return res.status(403).json({ error: "Direct access blocked" });
+  }
+  // Serve other assets (css/js) normally
+  express.static(path.join(__dirname, "admin-portal"))(req, res, next);
+});
 
 // ── Frame Protection for Shopify ─────────────────────────────────────────────
 app.use((req, res, next) => {

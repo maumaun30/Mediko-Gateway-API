@@ -43,9 +43,38 @@
         <div id="modal-caption" class="text-white mt-6 font-medium text-xl bg-gray-800 px-4 py-2 rounded"></div>
     </div>
 
+    <script src="https://unpkg.com/@shopify/app-bridge-utils@3"></script>
     <script>
-        const API_KEY = '62231b0a34a9e630177166f3cb9ce01f8b814ef2763339fcd1ea241feabd6e52'; // Use the key from your .env
+        let dashboardToken = null;
+
         const GATEWAY_URL = 'https://mediko-gateway.quailshack.com';
+
+        // Shopify App Bridge init
+        const apiKey = 'your-shopify-app-public-key'; // From Shopify Partner Dashboard
+        const app = window['app-bridge'].createApp({
+            apiKey: apiKey,
+            host: new URLSearchParams(window.location.search).get('host')
+        });
+
+        // Authenticate with gateway
+        async function authenticateWithGateway() {
+            try {
+                const sessionToken = await window['app-bridge-utils'].getSessionToken(app);
+                const shopOrigin = new URLSearchParams(window.location.search).get('shop');
+
+                const res = await fetch(`${GATEWAY_URL}/api/auth/shopify`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({shopOrigin, sessionToken})
+                });
+
+                const data = await res.json();
+                dashboardToken = data.token;
+            } catch (e) {
+                alert('Shopify authentication failed. Use within Shopify Admin.');
+                window.top.close();
+            }
+        }
 
         // --- Modal Control Functions ---
         function openPreview(photoString, name) {
@@ -79,6 +108,12 @@
         });
 
         async function loadSubmissions() {
+            if (!dashboardToken) {
+                document.getElementById('table-body').innerHTML =
+                    '<tr><td colspan="4" class="p-4 text-center">Authenticating...</td></tr>';
+                await authenticateWithGateway();
+            }
+
             const tbody = document.getElementById('table-body');
             tbody.innerHTML = '<tr><td colspan="4" class="p-4 text-center">Loading...</td></tr>';
 
@@ -86,7 +121,7 @@
                 const res = await fetch(`${GATEWAY_URL}/api/submissions?limit=50`, {
                     method: 'GET',
                     headers: {
-                        'x-api-key': `${API_KEY}`,
+                        'Authorization': `Bearer ${dashboardToken}`,
                         'Content-Type': 'application/json'
                     }
                 });
