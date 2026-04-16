@@ -480,9 +480,9 @@ app.use((req, res, next) => {
 
 app.use("/admin-dashboard", (req, res, next) => {
   // Block direct access to index.html
-  if (req.path === "/index.html" || req.path === "/") {
-    return res.status(403).json({ error: "Direct access blocked" });
-  }
+  // if (req.path === "/index.html" || req.path === "/") {
+  //   return res.status(403).json({ error: "Direct access blocked" });
+  // }
   // Serve other assets (css/js) normally
   express.static(path.join(__dirname, "admin-portal"))(req, res, next);
 });
