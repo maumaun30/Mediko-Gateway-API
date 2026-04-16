@@ -9,6 +9,8 @@ const rateLimit = require("express-rate-limit");
 
 const app = express();
 
+app.set('trust proxy', 1);
+
 // --- SECURITY: CORS LOCKDOWN ---
 const allowedOriginsEnv = process.env.ALLOWED_ORIGINS || "";
 const allowedOrigins = allowedOriginsEnv
@@ -42,6 +44,7 @@ const submitLimiter = rateLimit({
   message: { error: "Too many attempts. Please try again after 15 minutes." },
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req, res) => req.ip,
 });
 
 // --- STORAGE CONFIG ---
