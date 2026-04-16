@@ -46,21 +46,21 @@
     <script src="https://unpkg.com/@shopify/app-bridge-utils@3"></script>
     <script>
         let dashboardToken = null;
-
         const GATEWAY_URL = 'https://mediko-gateway.quailshack.com';
 
         // Shopify App Bridge init
-        const apiKey = 'your-shopify-app-public-key'; // From Shopify Partner Dashboard
+        const urlParams = new URLSearchParams(window.location.search);
+        const apiKey = urlParams.get('apiKey') || 'dummy-key-for-testing'; // Replace with real Shopify app public key
         const app = window['app-bridge'].createApp({
             apiKey: apiKey,
-            host: new URLSearchParams(window.location.search).get('host')
+            host: urlParams.get('host')
         });
 
         // Authenticate with gateway
         async function authenticateWithGateway() {
             try {
                 const sessionToken = await window['app-bridge-utils'].getSessionToken(app);
-                const shopOrigin = new URLSearchParams(window.location.search).get('shop');
+                const shopOrigin = urlParams.get('shop');
 
                 const res = await fetch(`${GATEWAY_URL}/api/auth/shopify`, {
                     method: 'POST',
@@ -68,67 +68,28 @@
                     body: JSON.stringify({shopOrigin, sessionToken})
                 });
 
+                if (!res.ok) {
+                    console.error('Auth failed:', await res.text());
+                    throw new Error('Auth failed');
+                }
+
                 const data = await res.json();
                 dashboardToken = data.token;
+                console.log('✅ Auth token received');
             } catch (e) {
-                alert('Shopify authentication failed. Use within Shopify Admin.');
-                window.top.close();
+                console.error('Auth error:', e);
+                throw e;
             }
         }
-
-        // --- Modal Control Functions ---
-        function openPreview(photoString, name) {
-            const modal = document.getElementById('image-modal');
-            const container = document.getElementById('modal-container');
-            const caption = document.getElementById('modal-caption');
-
-            // photoString is "uploads/id1.jpg,uploads/id2.jpg"
-            const photos = photoString.split(',');
-            container.innerHTML = '';
-
-            photos.forEach(path => {
-                const fileName = path.split('/').pop();
-                const img = document.createElement('img');
-                img.src = `${GATEWAY_URL}/view-uploads/${fileName}`;
-                img.className = "max-h-[70vh] w-auto rounded shadow-xl border-2 border-white object-contain bg-gray-900";
-                container.appendChild(img);
-            });
-
-            caption.innerText = `Reviewing IDs for: ${name}`;
-            modal.classList.remove('hidden');
-        }
-
-        function closeModal() {
-            document.getElementById('image-modal').classList.add('hidden');
-        }
-
-        // Close modal on 'Esc' key
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') closeModal();
-        });
 
         async function loadSubmissions() {
             const tbody = document.getElementById('table-body');
             tbody.innerHTML = '<tr><td colspan="4" class="p-4 text-center">Loading...</td></tr>';
 
             try {
-                let headers = {'Content-Type': 'application/json'};
-
                 if (!dashboardToken) {
-                    const sessionToken = await window['app-bridge-utils'].getSessionToken(app);
-                    const shopOrigin = new URLSearchParams(window.location.search).get('shop');
-
-                    const authRes = await fetch(`${GATEWAY_URL}/api/auth/shopify`, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({shopOrigin, sessionToken})
-                    });
-                    const authData = await authRes.json();
-                    dashboardToken = authData.token;
+                    await authenticateWithGateway();
                 }
-
-                headers['Authorization'] = `Bearer ${dashboardToken}`;
-
                 const res = await fetch(`${GATEWAY_URL}/api/submissions?limit=50`, {
                     method: 'GET',
                     headers: {
@@ -137,12 +98,15 @@
                     }
                 });
 
+                console.log('Submissions response:', res.status, await res.text()); // DEBUG
+
                 if (!res.ok) {
                     const errorData = await res.json();
                     throw new Error(errorData.error || `Server Error: ${res.status}`);
                 }
 
                 const json = await res.json();
+                console.log('✅ Data loaded:', json.data?.length || 0, 'records');
 
                 tbody.innerHTML = json.data.map(app => {
                     const photoArray = app.id_photo_path.split(',');
@@ -180,6 +144,37 @@
                 tbody.innerHTML = `<tr><td colspan="4" class="p-4 text-center text-red-500">Error: ${e.message}</td></tr>`;
             }
         }
+
+        // --- Modal Control Functions ---
+        function openPreview(photoString, name) {
+            const modal = document.getElementById('image-modal');
+            const container = document.getElementById('modal-container');
+            const caption = document.getElementById('modal-caption');
+
+            // photoString is "uploads/id1.jpg,uploads/id2.jpg"
+            const photos = photoString.split(',');
+            container.innerHTML = '';
+
+            photos.forEach(path => {
+                const fileName = path.split('/').pop();
+                const img = document.createElement('img');
+                img.src = `${GATEWAY_URL}/view-uploads/${fileName}`;
+                img.className = "max-h-[70vh] w-auto rounded shadow-xl border-2 border-white object-contain bg-gray-900";
+                container.appendChild(img);
+            });
+
+            caption.innerText = `Reviewing IDs for: ${name}`;
+            modal.classList.remove('hidden');
+        }
+
+        function closeModal() {
+            document.getElementById('image-modal').classList.add('hidden');
+        }
+
+        // Close modal on 'Esc' key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeModal();
+        });
 
         loadSubmissions();
     </script>
