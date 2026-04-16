@@ -397,7 +397,7 @@ app.get("/api/submissions", (req, res) => {
 
       const totalItems = countResult[0].total;
 
-      db.execute(
+      db.query(
         "SELECT * FROM applications ORDER BY created_at DESC LIMIT ? OFFSET ?",
         [limit, offset],
         (err, results) => {
