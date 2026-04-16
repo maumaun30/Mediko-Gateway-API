@@ -126,7 +126,7 @@ transporter.verify((err) => {
 // Helper: send email and log result
 async function sendApplicationEmails(application, reqFiles) {
   // Changed argument name to reqFiles
-  const { full_name, email_address, id_number, insertId } = application;
+  const { full_name, birthday, contact_number, email_address, id_number, insertId } = application;
 
   // Map the multer files to nodemailer attachments
   const attachments = reqFiles
