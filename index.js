@@ -60,13 +60,15 @@ app.use((req, _res, next) => {
 });
 
 // ── Rate limiting ─────────────────────────────────────────────────────────────
+const { ipKeyGenerator } = rateLimit;
+
 const submitLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 3,
   message: { error: "Too many attempts. Please try again after 15 minutes." },
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => req.ip,
+  keyGenerator: (req) => ipKeyGenerator(req),
   handler(req, res, _next, options) {
     log("warn", "rate_limit_hit", { ip: req.ip });
     res.status(options.statusCode).json(options.message);
