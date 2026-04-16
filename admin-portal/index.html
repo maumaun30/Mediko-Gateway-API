@@ -108,16 +108,27 @@
         });
 
         async function loadSubmissions() {
-            if (!dashboardToken) {
-                document.getElementById('table-body').innerHTML =
-                    '<tr><td colspan="4" class="p-4 text-center">Authenticating...</td></tr>';
-                await authenticateWithGateway();
-            }
-
             const tbody = document.getElementById('table-body');
             tbody.innerHTML = '<tr><td colspan="4" class="p-4 text-center">Loading...</td></tr>';
 
             try {
+                let headers = {'Content-Type': 'application/json'};
+
+                if (!dashboardToken) {
+                    const sessionToken = await window['app-bridge-utils'].getSessionToken(app);
+                    const shopOrigin = new URLSearchParams(window.location.search).get('shop');
+
+                    const authRes = await fetch(`${GATEWAY_URL}/api/auth/shopify`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({shopOrigin, sessionToken})
+                    });
+                    const authData = await authRes.json();
+                    dashboardToken = authData.token;
+                }
+
+                headers['Authorization'] = `Bearer ${dashboardToken}`;
+
                 const res = await fetch(`${GATEWAY_URL}/api/submissions?limit=50`, {
                     method: 'GET',
                     headers: {
