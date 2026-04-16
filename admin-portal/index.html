@@ -52,14 +52,15 @@
             const container = document.getElementById('modal-container');
             const caption = document.getElementById('modal-caption');
 
+            // photoString is "uploads/id1.jpg,uploads/id2.jpg"
             const photos = photoString.split(',');
-            container.innerHTML = ''; // Clear previous
+            container.innerHTML = '';
 
             photos.forEach(path => {
                 const fileName = path.split('/').pop();
                 const img = document.createElement('img');
                 img.src = `https://mediko-gateway.quailshack.com/view-uploads/${fileName}`;
-                img.className = "max-h-[75vh] rounded shadow-2xl border-2 border-white object-contain";
+                img.className = "max-h-[70vh] w-auto rounded shadow-xl border-2 border-white object-contain bg-gray-900";
                 container.appendChild(img);
             });
 
