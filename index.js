@@ -18,7 +18,7 @@ function log(level, event, data = {}) {
       level,
       event,
       ...data,
-    })
+    }),
   );
 }
 
@@ -40,7 +40,7 @@ app.use(
     },
     methods: ["GET", "POST"],
     optionsSuccessStatus: 200,
-  })
+  }),
 );
 
 app.use(express.json({ limit: "1mb" }));
@@ -127,6 +127,13 @@ transporter.verify((err) => {
 async function sendApplicationEmails(application, photoPaths) {
   const { full_name, email_address, id_number, insertId } = application;
 
+  const attachments = reqFiles
+    ? reqFiles.map((f) => ({
+        filename: f.originalname, // Original name of the file
+        path: f.path, // Local path on the server
+      }))
+    : [];
+
   // 1. Confirmation to the applicant
   const applicantMail = {
     from: `"Mediko.ph" <${process.env.MAIL_FROM}>`,
@@ -146,8 +153,12 @@ async function sendApplicationEmails(application, photoPaths) {
   const adminMail = {
     from: `"Mediko Gateway" <${process.env.MAIL_FROM}>`,
     to: process.env.ADMIN_EMAIL,
-    cc: (process.env.ADMIN_CC && process.env.ADMIN_CC.trim() !== "") ? process.env.ADMIN_CC.split(',') : [],
+    cc:
+      process.env.ADMIN_CC && process.env.ADMIN_CC.trim() !== ""
+        ? process.env.ADMIN_CC.split(",")
+        : [],
     subject: `[Mediko] New application #${insertId} — ${full_name}`,
+    attachments: attachments,
     html: `
       <h3>New discount application received</h3>
       <table>
@@ -180,108 +191,135 @@ async function sendApplicationEmails(application, photoPaths) {
 }
 
 // ── POST /api/apply ───────────────────────────────────────────────────────────
-app.post("/api/apply", submitLimiter, upload.array("id_photos", 2), (req, res) => {
-  const { full_name, birthday, contact_number, email_address, id_number } = req.body;
-  const now = Date.now();
-  const formLoadedAt = parseInt(req.body.form_loaded_at, 10);
+app.post(
+  "/api/apply",
+  submitLimiter,
+  upload.array("id_photos", 2),
+  (req, res) => {
+    const { full_name, birthday, contact_number, email_address, id_number } =
+      req.body;
+    const now = Date.now();
+    const formLoadedAt = parseInt(req.body.form_loaded_at, 10);
 
-  log("info", "apply_attempt", { email: email_address, ip: req.ip });
+    log("info", "apply_attempt", { email: email_address, ip: req.ip });
 
-  // 1. Validation
-  if (!full_name || full_name.trim().length < 3) {
-    log("warn", "validation_failed", { field: "full_name", ip: req.ip });
-    return res.status(400).json({ error: "Invalid full name." });
-  }
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email_address)) {
-    log("warn", "validation_failed", { field: "email_address", ip: req.ip });
-    return res.status(400).json({ error: "Invalid email address." });
-  }
-  if (!/^(\+639|09)\d{9}$/.test(contact_number.replace(/[\s\-]/g, ""))) {
-    log("warn", "validation_failed", { field: "contact_number", ip: req.ip });
-    return res.status(400).json({ error: "Invalid Philippine contact number." });
-  }
-  if (!id_number || id_number.trim().length < 6) {
-    log("warn", "validation_failed", { field: "id_number", ip: req.ip });
-    return res.status(400).json({ error: "Invalid ID number." });
-  }
-  if (!req.files || req.files.length === 0) {
-    log("warn", "validation_failed", { field: "id_photos", ip: req.ip });
-    return res.status(400).json({ error: "ID photo(s) are required." });
-  }
-
-  // 2. Time trap
-  if (!formLoadedAt || now - formLoadedAt < 3000) {
-    log("warn", "time_trap_triggered", { ip: req.ip });
-    return res.status(200).json({ success: true }); // Silent reject
-  }
-
-  // 3. Honeypot
-  const dynamicHp = Object.keys(req.body).find((k) => k.startsWith("hp_"));
-  if (dynamicHp && req.body[dynamicHp]) {
-    log("warn", "honeypot_triggered", { ip: req.ip, field: dynamicHp });
-    return res.status(200).json({ success: true }); // Silent reject
-  }
-
-  // 4. Cooldown — prevent duplicate submissions from same email
-  const cooldownSql = `
-    SELECT id FROM applications
-    WHERE email_address = ?
-    AND created_at > NOW() - INTERVAL 10 MINUTE
-    LIMIT 1
-  `;
-
-  db.query(cooldownSql, [email_address], (err, rows) => {
-    if (err) {
-      log("error", "db_cooldown_check_failed", { message: err.message });
-      return res.status(500).json({ error: "Database error. Please try again." });
+    // 1. Validation
+    if (!full_name || full_name.trim().length < 3) {
+      log("warn", "validation_failed", { field: "full_name", ip: req.ip });
+      return res.status(400).json({ error: "Invalid full name." });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email_address)) {
+      log("warn", "validation_failed", { field: "email_address", ip: req.ip });
+      return res.status(400).json({ error: "Invalid email address." });
+    }
+    if (!/^(\+639|09)\d{9}$/.test(contact_number.replace(/[\s\-]/g, ""))) {
+      log("warn", "validation_failed", { field: "contact_number", ip: req.ip });
+      return res
+        .status(400)
+        .json({ error: "Invalid Philippine contact number." });
+    }
+    if (!id_number || id_number.trim().length < 6) {
+      log("warn", "validation_failed", { field: "id_number", ip: req.ip });
+      return res.status(400).json({ error: "Invalid ID number." });
+    }
+    if (!req.files || req.files.length === 0) {
+      log("warn", "validation_failed", { field: "id_photos", ip: req.ip });
+      return res.status(400).json({ error: "ID photo(s) are required." });
     }
 
-    if (rows.length > 0) {
-      log("warn", "cooldown_rejected", { email: email_address, ip: req.ip });
-      return res.status(429).json({ error: "Please wait before submitting again." });
+    // 2. Time trap
+    if (!formLoadedAt || now - formLoadedAt < 3000) {
+      log("warn", "time_trap_triggered", { ip: req.ip });
+      return res.status(200).json({ success: true }); // Silent reject
     }
 
-    // 5. Insert
-    const photoPaths = req.files.map((f) => f.path).join(",");
+    // 3. Honeypot
+    const dynamicHp = Object.keys(req.body).find((k) => k.startsWith("hp_"));
+    if (dynamicHp && req.body[dynamicHp]) {
+      log("warn", "honeypot_triggered", { ip: req.ip, field: dynamicHp });
+      return res.status(200).json({ success: true }); // Silent reject
+    }
 
-    const insertSql = `
+    // 4. Cooldown — prevent duplicate submissions from same email
+    const cooldownSql = `
+      SELECT id FROM applications
+      WHERE email_address = ? AND id_number = ?
+      AND created_at > NOW() - INTERVAL 2 MINUTE
+      LIMIT 1
+    `;
+
+    db.query(cooldownSql, [email_address], (err, rows) => {
+      if (err) {
+        log("error", "db_cooldown_check_failed", { message: err.message });
+        return res.status(500).json({ error: "Database error." });
+      }
+
+      if (rows.length > 0) {
+        // If they just submitted this EXACT same info, don't error out.
+        // Just tell them it's already received so they don't panic.
+        log("info", "duplicate_ignored", { email: email_address });
+        return res.status(200).json({
+          success: true,
+          message:
+            "We already received this application. No need to submit again!",
+        });
+      }
+
+      // 5. Insert
+      const photoPaths = req.files.map((f) => f.path).join(",");
+
+      const insertSql = `
       INSERT INTO applications
         (full_name, birthday, contact_number, email_address, id_number, id_photo_path)
       VALUES (?, ?, ?, ?, ?, ?)
     `;
 
-    db.query(
-      insertSql,
-      [full_name.trim(), birthday, contact_number.trim(), email_address.trim(), id_number.trim(), photoPaths],
-      (err, result) => {
-        if (err) {
-          log("error", "db_insert_failed", { message: err.message, email: email_address });
-          return res.status(500).json({ error: "Failed to save application." });
-        }
+      db.query(
+        insertSql,
+        [
+          full_name.trim(),
+          birthday,
+          contact_number.trim(),
+          email_address.trim(),
+          id_number.trim(),
+          photoPaths,
+        ],
+        (err, result) => {
+          if (err) {
+            log("error", "db_insert_failed", {
+              message: err.message,
+              email: email_address,
+            });
+            return res
+              .status(500)
+              .json({ error: "Failed to save application." });
+          }
 
-        log("info", "application_saved", {
-          appId: result.insertId,
-          email: email_address,
-          ip: req.ip,
-          photoCount: req.files.length,
-        });
+          log("info", "application_saved", {
+            appId: result.insertId,
+            email: email_address,
+            ip: req.ip,
+            photoCount: req.files.length,
+          });
 
-        // Respond immediately — don't wait for email
-        res.json({
-          success: true,
-          message: "Application submitted successfully! Please check your email for confirmation.",
-          id: result.insertId,
-        });
+          // Respond immediately — don't wait for email
+          res.json({
+            success: true,
+            message:
+              "Application submitted successfully! Please check your email for confirmation.",
+            id: result.insertId,
+          });
 
-        // Send emails in the background
-        sendApplicationEmails(
-          { full_name, email_address, id_number, insertId: result.insertId },
-          photoPaths
-        );
-      }
-    );
-  });
-});
+          // Send emails in the background
+          sendApplicationEmails(
+            { full_name, email_address, id_number, insertId: result.insertId },
+            req.files,
+          );
+        },
+      );
+    });
+  },
+);
 
 // ── GET /api/submissions ──────────────────────────────────────────────────────
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
@@ -294,40 +332,48 @@ app.get("/api/submissions", (req, res) => {
     return res.status(401).json({ error: "Unauthorized." });
   }
 
-  const page   = Math.max(1, parseInt(req.query.page)  || 1);
-  const limit  = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
   const offset = (page - 1) * limit;
 
-  db.query("SELECT COUNT(*) AS total FROM applications", (countErr, countResult) => {
-    if (countErr) {
-      log("error", "db_count_failed", { message: countErr.message });
-      return res.status(500).json({ error: countErr.message });
-    }
-
-    const totalItems = countResult[0].total;
-
-    db.execute(
-      "SELECT * FROM applications ORDER BY created_at DESC LIMIT ? OFFSET ?",
-      [limit, offset],
-      (err, results) => {
-        if (err) {
-          log("error", "db_select_failed", { message: err.message });
-          return res.status(500).json({ error: err.message });
-        }
-
-        log("info", "submissions_listed", { page, limit, totalItems, ip: req.ip });
-
-        res.status(200).json({
-          metadata: {
-            total_items: totalItems,
-            total_pages: Math.ceil(totalItems / limit),
-            current_page: page,
-          },
-          data: results,
-        });
+  db.query(
+    "SELECT COUNT(*) AS total FROM applications",
+    (countErr, countResult) => {
+      if (countErr) {
+        log("error", "db_count_failed", { message: countErr.message });
+        return res.status(500).json({ error: countErr.message });
       }
-    );
-  });
+
+      const totalItems = countResult[0].total;
+
+      db.execute(
+        "SELECT * FROM applications ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        [limit, offset],
+        (err, results) => {
+          if (err) {
+            log("error", "db_select_failed", { message: err.message });
+            return res.status(500).json({ error: err.message });
+          }
+
+          log("info", "submissions_listed", {
+            page,
+            limit,
+            totalItems,
+            ip: req.ip,
+          });
+
+          res.status(200).json({
+            metadata: {
+              total_items: totalItems,
+              total_pages: Math.ceil(totalItems / limit),
+              current_page: page,
+            },
+            data: results,
+          });
+        },
+      );
+    },
+  );
 });
 
 // ── Global error handler ──────────────────────────────────────────────────────
