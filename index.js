@@ -123,18 +123,19 @@ transporter.verify((err) => {
   }
 });
 
-// Helper: send email and log result (non-blocking — never fails the request)
-async function sendApplicationEmails(application, photoPaths) {
+// Helper: send email and log result
+async function sendApplicationEmails(application, reqFiles) {
+  // Changed argument name to reqFiles
   const { full_name, email_address, id_number, insertId } = application;
 
+  // Map the multer files to nodemailer attachments
   const attachments = reqFiles
     ? reqFiles.map((f) => ({
-        filename: f.originalname, // Original name of the file
-        path: f.path, // Local path on the server
+        filename: f.originalname,
+        path: f.path,
       }))
     : [];
 
-  // 1. Confirmation to the applicant
   const applicantMail = {
     from: `"Mediko.ph" <${process.env.MAIL_FROM}>`,
     to: email_address,
@@ -149,7 +150,6 @@ async function sendApplicationEmails(application, photoPaths) {
     `,
   };
 
-  // 2. Internal alert to the admin
   const adminMail = {
     from: `"Mediko Gateway" <${process.env.MAIL_FROM}>`,
     to: process.env.ADMIN_EMAIL,
@@ -161,28 +161,23 @@ async function sendApplicationEmails(application, photoPaths) {
     attachments: attachments,
     html: `
       <h3>New discount application received</h3>
-      <table>
+      <table border="1" style="border-collapse: collapse; padding: 10px;">
         <tr><td><strong>App ID</strong></td><td>${insertId}</td></tr>
         <tr><td><strong>Name</strong></td><td>${full_name}</td></tr>
         <tr><td><strong>Email</strong></td><td>${email_address}</td></tr>
         <tr><td><strong>ID Number</strong></td><td>${id_number}</td></tr>
-        <tr><td><strong>Photos</strong></td><td>${photoPaths || "none"}</td></tr>
       </table>
+      <p>ID photos are attached to this email.</p>
     `,
   };
 
   try {
-    const [applicantInfo, adminInfo] = await Promise.all([
+    await Promise.all([
       transporter.sendMail(applicantMail),
       transporter.sendMail(adminMail),
     ]);
-    log("info", "emails_sent", {
-      appId: insertId,
-      applicantMessageId: applicantInfo.messageId,
-      adminMessageId: adminInfo.messageId,
-    });
+    log("info", "emails_sent", { appId: insertId });
   } catch (err) {
-    // Log but don't surface email errors to the applicant
     log("error", "email_send_failed", {
       appId: insertId,
       message: err.message,
@@ -256,10 +251,10 @@ app.post(
       WHERE email_address = ? 
         AND id_number = ?
         AND created_at > DATE_SUB(NOW(), INTERVAL 2 MINUTE)
-      LIMIT 1;
+      LIMIT 1
     `;
 
-    db.query(cooldownSql, [email_address], (err, rows) => {
+    db.query(cooldownSql, [email_address, id_number], (err, rows) => {
       if (err) {
         log("error", "db_cooldown_check_failed", { message: err.message });
         return res.status(500).json({ error: "Database error." });
