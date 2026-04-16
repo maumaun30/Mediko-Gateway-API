@@ -31,6 +31,8 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
 app.use(
   cors({
     origin(origin, callback) {
+      // 1. Allow internal requests (no origin)
+      // 2. Allow origins defined in .env
       if (!origin || allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
@@ -38,7 +40,8 @@ app.use(
         callback(new Error("Not allowed by CORS Policy"));
       }
     },
-    methods: ["GET", "POST"],
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "x-api-key"], // Important for your admin dashboard
     optionsSuccessStatus: 200,
   }),
 );
@@ -215,6 +218,8 @@ async function sendApplicationEmails(application, reqFiles, metadataStr) {
     });
   }
 }
+
+app.use("/view-uploads", express.static(path.join(__dirname, "uploads")));
 
 // ── POST /api/apply ───────────────────────────────────────────────────────────
 app.post(
@@ -422,23 +427,27 @@ app.get("/api/submissions", (req, res) => {
   );
 });
 
-app.use('/admin-dashboard', express.static(path.join(__dirname, 'admin-portal')));
+app.use(
+  "/admin-dashboard",
+  express.static(path.join(__dirname, "admin-portal")),
+);
 
 // ── Frame Protection for Shopify ─────────────────────────────────────────────
 app.use((req, res, next) => {
-  // Replace 'store.mediko.ph' with your actual myshopify.com domain if different
-  const shopifyAdmin = "https://admin.shopify.com";
-  const shopifyStore = "https://store.mediko.ph"; 
-  const myshopify = "https://mediko-ph.myshopify.com"; // Your internal shopify domain
+  // Get origins from .env (e.g., "https://admin.shopify.com, https://store.mediko.ph")
+  const origins = (process.env.ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((o) => o.trim())
+    .join(" ");
 
   res.setHeader(
     "Content-Security-Policy",
-    `frame-ancestors 'self' ${shopifyAdmin} ${shopifyStore} ${myshopify};`
+    `frame-ancestors 'self' ${origins};`,
   );
-  
-  // Remove X-Frame-Options because CSP frame-ancestors overrides it
+
+  // Remove X-Frame-Options to allow CSP to take precedence
   res.removeHeader("X-Frame-Options");
-  
+
   next();
 });
 

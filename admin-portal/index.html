@@ -45,6 +45,7 @@
 
     <script>
         const API_KEY = '62231b0a34a9e630177166f3cb9ce01f8b814ef2763339fcd1ea241feabd6e52'; // Use the key from your .env
+        const GATEWAY_URL = 'https://mediko-gateway.quailshack.com';
 
         // --- Modal Control Functions ---
         function openPreview(photoString, name) {
@@ -59,7 +60,7 @@
             photos.forEach(path => {
                 const fileName = path.split('/').pop();
                 const img = document.createElement('img');
-                img.src = `https://mediko-gateway.quailshack.com/view-uploads/${fileName}`;
+                img.src = `${GATEWAY_URL}/view-uploads/${fileName}`;
                 img.className = "max-h-[70vh] w-auto rounded shadow-xl border-2 border-white object-contain bg-gray-900";
                 container.appendChild(img);
             });
@@ -82,9 +83,19 @@
             tbody.innerHTML = '<tr><td colspan="4" class="p-4 text-center">Loading...</td></tr>';
 
             try {
-                const res = await fetch('/api/submissions?limit=50', {
-                    headers: {'x-api-key': API_KEY}
+                const res = await fetch(`${GATEWAY_URL}/api/submissions?limit=50`, {
+                    method: 'GET',
+                    headers: {
+                        'x-api-key': `${API_KEY}`,
+                        'Content-Type': 'application/json'
+                    }
                 });
+
+                if (!res.ok) {
+                    const errorData = await res.json();
+                    throw new Error(errorData.error || `Server Error: ${res.status}`);
+                }
+
                 const json = await res.json();
 
                 tbody.innerHTML = json.data.map(app => {
@@ -100,7 +111,7 @@
                         <div class="flex gap-2">
                             ${photoArray.map((path, i) => {
                         const fileName = path.split('/').pop();
-                        const fullUrl = `https://mediko-gateway.quailshack.com/view-uploads/${fileName}`;
+                        const fullUrl = `${GATEWAY_URL}/view-uploads/${fileName}`;
                         return `
                                     <button onclick="openPreview('${fullUrl}', '${app.full_name}')" 
                                             class="bg-gray-100 hover:bg-blue-100 border border-gray-300 rounded px-2 py-1 text-xs flex items-center gap-1">
@@ -119,7 +130,8 @@
                     `;
                 }).join('');
             } catch (e) {
-                tbody.innerHTML = '<tr><td colspan="4" class="p-4 text-center text-red-500">Error loading data</td></tr>';
+                console.error("Dashboard Fetch Error:", e);
+                tbody.innerHTML = `<tr><td colspan="4" class="p-4 text-center text-red-500">Error: ${e.message}</td></tr>`;
             }
         }
 
