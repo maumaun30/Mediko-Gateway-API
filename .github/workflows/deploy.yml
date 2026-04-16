@@ -37,14 +37,14 @@ jobs:
             --exclude 'uploads' \
             --exclude '.env' \
             -e "ssh -o StrictHostKeyChecking=no" \
-            ./ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:htdocs/${{ secrets.SSH_HOST }}/
+            ./ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:htdocs/${{ secrets.SSH_DOMAIN }}/
 
       - name: Restart PM2 on Server
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
             export NVM_DIR="$HOME/.nvm"
             [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-            cd htdocs/${{ secrets.SSH_HOST }}
+            cd htdocs/${{ secrets.SSH_DOMAIN }}
             npm install --production
             pm2 restart all
           EOF
