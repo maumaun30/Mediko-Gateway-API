@@ -160,14 +160,27 @@ async function sendApplicationEmails(application, reqFiles) {
     subject: `[Mediko] New application #${insertId} — ${full_name}`,
     attachments: attachments,
     html: `
-      <h3>New discount application received</h3>
-      <table border="1" style="border-collapse: collapse; padding: 10px;">
-        <tr><td><strong>App ID</strong></td><td>${insertId}</td></tr>
-        <tr><td><strong>Name</strong></td><td>${full_name}</td></tr>
-        <tr><td><strong>Email</strong></td><td>${email_address}</td></tr>
-        <tr><td><strong>ID Number</strong></td><td>${id_number}</td></tr>
+      <h3 style="color: #2c3e50;">New discount application received</h3>
+      
+      <h4 style="margin-bottom: 5px;">Applicant Details:</h4>
+      <table border="1" style="border-collapse: collapse; width: 100%; max-width: 600px; font-family: sans-serif;">
+        <tr style="background-color: #f8f9fa;"><td style="padding: 8px; width: 150px;"><strong>App ID</strong></td><td style="padding: 8px;">#${insertId}</td></tr>
+        <tr><td style="padding: 8px;"><strong>Name</strong></td><td style="padding: 8px;">${full_name}</td></tr>
+        <tr><td style="padding: 8px;"><strong>Birthday</strong></td><td style="padding: 8px;">${birthday}</td></tr>
+        <tr><td style="padding: 8px;"><strong>Contact No.</strong></td><td style="padding: 8px;">${contact_number}</td></tr>
+        <tr><td style="padding: 8px;"><strong>Email</strong></td><td style="padding: 8px;">${email_address}</td></tr>
+        <tr><td style="padding: 8px;"><strong>ID Number</strong></td><td style="padding: 8px;">${id_number}</td></tr>
       </table>
-      <p>ID photos are attached to this email.</p>
+
+      <h4 style="margin-bottom: 5px; margin-top: 20px;">Technical Metadata:</h4>
+      <table border="1" style="border-collapse: collapse; width: 100%; max-width: 600px; font-family: sans-serif; font-size: 12px; color: #555;">
+        <tr><td style="padding: 6px; width: 150px;"><strong>IP Address</strong></td><td style="padding: 6px;">${meta.ip || "N/A"}</td></tr>
+        <tr><td style="padding: 6px;"><strong>Origin</strong></td><td style="padding: 6px;">${meta.origin || "N/A"}</td></tr>
+        <tr><td style="padding: 6px;"><strong>Browser Agent</strong></td><td style="padding: 6px;">${meta.user_agent || "N/A"}</td></tr>
+        <tr><td style="padding: 6px;"><strong>Referer</strong></td><td style="padding: 6px;">${meta.referer || "N/A"}</td></tr>
+      </table>
+
+      <p style="margin-top: 20px;"><em>ID photos are attached to this email as files.</em></p>
     `,
   };
 
