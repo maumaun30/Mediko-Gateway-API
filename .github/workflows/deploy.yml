@@ -1,0 +1,49 @@
+name: Deploy Mediko Gateway to CloudPanel
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22' # Match your CloudPanel Node version
+
+      - name: Install Dependencies
+        run: npm install --production
+
+      - name: Install SSH Key
+        uses: shimataro/ssh-key-action@v2
+        with:
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          known_hosts: unnecessary # We will skip host checking for speed
+          if_key_exists: replace
+
+      - name: Deploy via Rsync
+        run: |
+          rsync -avz --delete \
+            --exclude '.git*' \
+            --exclude 'node_modules' \
+            --exclude 'uploads' \
+            --exclude '.env' \
+            -e "ssh -o StrictHostKeyChecking=no" \
+            ./ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:htdocs/${{ secrets.SSH_HOST }}/
+
+      - name: Restart PM2 on Server
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+            cd htdocs/${{ secrets.SSH_HOST }}
+            npm install --production
+            pm2 restart all
+          EOF
