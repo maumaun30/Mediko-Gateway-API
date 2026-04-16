@@ -32,8 +32,6 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
 app.use(
   cors({
     origin(origin, callback) {
-      // 1. Allow internal requests (no origin)
-      // 2. Allow origins defined in .env
       if (!origin || allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
@@ -42,7 +40,7 @@ app.use(
       }
     },
     methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "x-api-key"], // Important for your admin dashboard
+    allowedHeaders: ["Content-Type", "x-api-key", "Authorization"],
     optionsSuccessStatus: 200,
   }),
 );
