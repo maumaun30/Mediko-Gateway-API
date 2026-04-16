@@ -451,8 +451,8 @@ app.post("/api/auth/shopify", express.json(), async (req, res) => {
 
     // Generate short-lived JWT for dashboard
     const dashboardToken = jwt.sign(
-      { shopOrigin, admin: true, exp: Math.floor(Date.now() / 1000) + 60 * 60 },
-      secret, // ✅ SAME SECRET
+      { shopOrigin, admin: true, exp: Math.floor(Date.now() / 1000) + 30 * 60 }, // 30min vs 60min
+      secret,
     );
 
     console.log("✅ Token generated for:", shopOrigin);
