@@ -376,19 +376,19 @@ app.post(
 // ── GET /api/submissions ──────────────────────────────────────────────────────
 app.get("/api/submissions", (req, res) => {
   try {
-    // ✅ Check JWT token first (more secure than API key)
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    if (!authHeader?.startsWith("Bearer ")) {
       return res.status(401).json({ error: "Missing Bearer token" });
     }
 
     const token = authHeader.split(" ")[1];
-    jwt.verify(
-      token,
-      process.env.DASHBOARD_JWT_SECRET || "fallback-secret-change-me",
-    );
+    const secret =
+      process.env.DASHBOARD_JWT_SECRET || "mediko-dashboard-secret-2026"; // ✅ SAME FALLBACK
+
+    jwt.verify(token, secret);
+    console.log("✅ JWT verified OK"); // DEBUG
   } catch (err) {
-    log("warn", "invalid_jwt_token", { ip: req.ip });
+    console.log("❌ JWT ERROR:", err.message); // DEBUG
     return res.status(401).json({ error: "Invalid or expired token" });
   }
 
@@ -446,16 +446,19 @@ app.post("/api/auth/shopify", express.json(), async (req, res) => {
       return res.status(401).json({ error: "Invalid Shopify session" });
     }
 
+    const secret =
+      process.env.DASHBOARD_JWT_SECRET || "mediko-dashboard-secret-2026";
+
     // Generate short-lived JWT for dashboard
     const dashboardToken = jwt.sign(
       { shopOrigin, admin: true, exp: Math.floor(Date.now() / 1000) + 60 * 60 },
-      process.env.DASHBOARD_JWT_SECRET || "fallback-secret-change-me",
+      secret, // ✅ SAME SECRET
     );
 
-    log("info", "shopify_auth_success", { shopOrigin });
+    console.log("✅ Token generated for:", shopOrigin);
     res.json({ token: dashboardToken });
   } catch (err) {
-    log("error", "shopify_auth_failed", { message: err.message });
+    console.error("Auth error:", err);
     res.status(401).json({ error: "Auth failed" });
   }
 });
