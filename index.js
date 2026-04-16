@@ -124,9 +124,23 @@ transporter.verify((err) => {
 });
 
 // Helper: send email and log result
-async function sendApplicationEmails(application, reqFiles) {
+async function sendApplicationEmails(application, reqFiles, metadataStr) {
   // Changed argument name to reqFiles
-  const { full_name, birthday, contact_number, email_address, id_number, insertId } = application;
+  const {
+    full_name,
+    email_address,
+    id_number,
+    birthday,
+    contact_number,
+    insertId,
+  } = application;
+
+  let meta = {};
+  try {
+    meta = JSON.parse(metadataStr);
+  } catch (e) {
+    meta = { error: "Could not parse metadata" };
+  }
 
   // Map the multer files to nodemailer attachments
   const attachments = reqFiles
@@ -136,17 +150,32 @@ async function sendApplicationEmails(application, reqFiles) {
       }))
     : [];
 
+  // 1. Confirmation to the applicant
   const applicantMail = {
     from: `"Mediko.ph" <${process.env.MAIL_FROM}>`,
     to: email_address,
-    subject: "We received your Senior/PWD discount application",
+    subject: "Application Received - Mediko.ph Discount",
     html: `
-      <p>Hi <strong>${full_name}</strong>,</p>
-      <p>Thank you for submitting your Senior Citizen / PWD discount application.</p>
-      <p><strong>Application ID:</strong> ${insertId}<br>
-         <strong>ID Number on file:</strong> ${id_number}</p>
-      <p>Our team will review your submission and get back to you within 3–5 business days.</p>
-      <p>— Mediko.ph Team</p>
+      <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
+        <h2 style="color: #2c3e50;">Hello ${full_name},</h2>
+        <p>We have successfully received your application for the Senior Citizen / PWD discount.</p>
+        
+        <div style="background-color: #f8f9fa; padding: 15px; border-left: 4px solid #005a9c; margin: 20px 0;">
+          <strong>What happens next?</strong><br>
+          Please wait for a Mediko representative to reach out to you. We may contact you via:
+          <ul>
+            <li><strong>Email:</strong> To send your unique discount code.</li>
+            <li><strong>SMS/Call:</strong> If we need clarification regarding your uploaded ID.</li>
+          </ul>
+          <p>Standard processing time is <strong>3 to 5 business days</strong>.</p>
+        </div>
+
+        <p><strong>Application Details:</strong><br>
+        ID Number: ${id_number}<br>
+        Reference ID: #$${insertId}</p>
+
+        <p>Stay healthy!<br><strong>Mediko.ph Team</strong></p>
+      </div>
     `,
   };
 
