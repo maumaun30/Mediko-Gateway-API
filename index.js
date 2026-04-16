@@ -424,8 +424,21 @@ app.get("/api/submissions", (req, res) => {
 
 app.use('/admin-dashboard', express.static(path.join(__dirname, 'admin-portal')));
 
+// ── Frame Protection for Shopify ─────────────────────────────────────────────
 app.use((req, res, next) => {
-  res.setHeader("Content-Security-Policy", "frame-ancestors https://*.myshopify.com https://admin.shopify.com;");
+  // Replace 'store.mediko.ph' with your actual myshopify.com domain if different
+  const shopifyAdmin = "https://admin.shopify.com";
+  const shopifyStore = "https://store.mediko.ph"; 
+  const myshopify = "https://mediko-ph.myshopify.com"; // Your internal shopify domain
+
+  res.setHeader(
+    "Content-Security-Policy",
+    `frame-ancestors 'self' ${shopifyAdmin} ${shopifyStore} ${myshopify};`
+  );
+  
+  // Remove X-Frame-Options because CSP frame-ancestors overrides it
+  res.removeHeader("X-Frame-Options");
+  
   next();
 });
 
