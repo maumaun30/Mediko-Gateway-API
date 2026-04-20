@@ -1,183 +1,322 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mediko Admin</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/@shopify/app-bridge@3"></script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mediko Admin</title>
+  <script src="https://cdn.tailwindcss.com"></script>
 </head>
-
 <body class="bg-gray-50 p-6">
-    <div class="max-w-6xl mx-auto">
-        <div class="flex justify-between items-center mb-6">
-            <h1 class="text-2xl font-bold text-gray-800">Discount Applications</h1>
-            <button onclick="loadSubmissions()"
-                class="bg-blue-600 text-white px-4 py-2 rounded shadow hover:bg-blue-700">Refresh</button>
-        </div>
 
-        <div class="bg-white shadow rounded-lg overflow-hidden">
-            <table class="min-w-full divide-y divide-gray-200">
-                <thead class="bg-gray-100">
-                    <tr>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Applicant</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">ID Number</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Photos</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
-                    </tr>
-                </thead>
-                <tbody id="table-body" class="divide-y divide-gray-200"></tbody>
-            </table>
-        </div>
+<!-- Login overlay (shown when no token yet) -->
+<div id="login-screen" class="fixed inset-0 z-50 flex items-center justify-center bg-gray-100">
+  <div class="bg-white rounded-xl shadow-md p-8 w-full max-w-sm">
+    <h2 class="text-xl font-bold text-gray-800 mb-1">Mediko Admin</h2>
+    <p class="text-sm text-gray-500 mb-5">Enter your admin password to continue.</p>
+    <input id="pw-input" type="password" placeholder="Password"
+      class="w-full border border-gray-300 rounded px-3 py-2 mb-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+    <p id="login-error" class="text-red-500 text-xs mb-2 hidden">Incorrect password.</p>
+    <button onclick="doLogin()"
+      class="w-full bg-blue-600 text-white py-2 rounded font-medium hover:bg-blue-700 text-sm">Login</button>
+  </div>
+</div>
+
+<!-- Main dashboard -->
+<div id="main-content" class="max-w-6xl mx-auto hidden">
+  <div class="flex justify-between items-center mb-6">
+    <h1 class="text-2xl font-bold text-gray-800">Discount Applications</h1>
+    <div class="flex gap-2">
+      <button onclick="loadSubmissions()"
+        class="bg-blue-600 text-white px-4 py-2 rounded shadow hover:bg-blue-700 text-sm">Refresh</button>
+      <button onclick="doLogout()"
+        class="bg-gray-200 text-gray-700 px-4 py-2 rounded shadow hover:bg-gray-300 text-sm">Logout</button>
     </div>
+  </div>
 
-    <div id="image-modal"
-        class="fixed inset-0 z-50 hidden bg-black bg-opacity-95 flex flex-col items-center justify-center p-6">
-        <button onclick="closeModal()"
-            class="absolute top-5 right-8 text-white text-5xl hover:text-gray-300 transition">&times;</button>
+  <!-- Pagination info -->
+  <div id="pagination-info" class="text-sm text-gray-500 mb-3 hidden">
+    Page <span id="current-page">1</span> of <span id="total-pages">1</span>
+    &nbsp;·&nbsp; <span id="total-items">0</span> total applications
+    <button id="prev-btn" onclick="changePage(-1)"
+      class="ml-4 px-2 py-1 border rounded text-xs hover:bg-gray-100 disabled:opacity-40">← Prev</button>
+    <button id="next-btn" onclick="changePage(1)"
+      class="ml-2 px-2 py-1 border rounded text-xs hover:bg-gray-100 disabled:opacity-40">Next →</button>
+  </div>
 
-        <div id="modal-container" class="flex flex-wrap justify-center gap-4 w-full max-w-7xl">
-        </div>
+  <div class="bg-white shadow rounded-lg overflow-hidden">
+    <table class="min-w-full divide-y divide-gray-200">
+      <thead class="bg-gray-100">
+        <tr>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Applicant</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">ID Number</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Photos</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="table-body" class="divide-y divide-gray-200"></tbody>
+    </table>
+  </div>
+</div>
 
-        <div id="modal-caption" class="text-white mt-6 font-medium text-xl bg-gray-800 px-4 py-2 rounded"></div>
-    </div>
+<!-- Image preview modal -->
+<div id="image-modal"
+  class="fixed inset-0 z-50 hidden bg-black bg-opacity-95 flex flex-col items-center justify-center p-6">
+  <button onclick="closeModal()"
+    class="absolute top-5 right-8 text-white text-5xl hover:text-gray-300 transition">&times;</button>
+  <div id="modal-container" class="flex flex-wrap justify-center gap-4 w-full max-w-7xl"></div>
+  <div id="modal-caption" class="text-white mt-6 font-medium text-xl bg-gray-800 px-4 py-2 rounded"></div>
+</div>
 
-    <script src="https://unpkg.com/@shopify/app-bridge-utils@3"></script>
-    <script>
-        let dashboardToken = null;
-        const GATEWAY_URL = 'https://mediko-gateway.quailshack.com';
+<script src="https://unpkg.com/@shopify/app-bridge@3"></script>
+<script src="https://unpkg.com/@shopify/app-bridge-utils@3"></script>
+<script>
+  const GATEWAY_URL = 'https://mediko-gateway.quailshack.com';
+  const TOKEN_KEY = 'mediko_dashboard_token';
 
-        // Shopify App Bridge init
-        const urlParams = new URLSearchParams(window.location.search);
-        const apiKey = urlParams.get('apiKey') || 'dummy-key-for-testing'; // Replace with real Shopify app public key
-        const app = window['app-bridge'].createApp({
-            apiKey: apiKey,
-            host: urlParams.get('host')
-        });
+  let dashboardToken = sessionStorage.getItem(TOKEN_KEY) || null;
+  let currentPage = 1;
+  let totalPages = 1;
 
-        // Authenticate with gateway
-        async function authenticateWithGateway() {
-            try {
-                const sessionToken = await window['app-bridge-utils'].getSessionToken(app);
-                const shopOrigin = urlParams.get('shop');
+  // ── Auth ──────────────────────────────────────────────────────────────────
 
-                const res = await fetch(`${GATEWAY_URL}/api/auth/shopify`, {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({shopOrigin, sessionToken})
-                });
+  async function doLogin() {
+    const pw = document.getElementById('pw-input').value.trim();
+    const errEl = document.getElementById('login-error');
+    errEl.classList.add('hidden');
 
-                if (!res.ok) {
-                    console.error('Auth failed:', await res.text());
-                    throw new Error('Auth failed');
-                }
+    if (!pw) return;
 
-                const data = await res.json();
-                dashboardToken = data.token;
-                console.log('✅ Auth token received');
-            } catch (e) {
-                console.error('Auth error:', e);
-                throw e;
-            }
+    try {
+      const res = await fetch(`${GATEWAY_URL}/api/auth/admin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pw })
+      });
+
+      if (!res.ok) {
+        errEl.classList.remove('hidden');
+        return;
+      }
+
+      const data = await res.json();
+      dashboardToken = data.token;
+      sessionStorage.setItem(TOKEN_KEY, dashboardToken);
+      showDashboard();
+      loadSubmissions();
+    } catch (e) {
+      errEl.textContent = 'Network error. Check console.';
+      errEl.classList.remove('hidden');
+      console.error('Login error:', e);
+    }
+  }
+
+  // Allow Enter key on password field
+  document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('pw-input')?.addEventListener('keydown', e => {
+      if (e.key === 'Enter') doLogin();
+    });
+  });
+
+  function doLogout() {
+    sessionStorage.removeItem(TOKEN_KEY);
+    dashboardToken = null;
+    document.getElementById('main-content').classList.add('hidden');
+    document.getElementById('login-screen').classList.remove('hidden');
+  }
+
+  async function tryShopifyAuth() {
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const host = urlParams.get('host');
+      const apiKey = urlParams.get('apiKey') || 'dummy-key';
+      const shopOrigin = urlParams.get('shop');
+
+      if (!host || !shopOrigin) return false;
+
+      const app = window['app-bridge'].createApp({ apiKey, host });
+      const sessionToken = await window['app-bridge-utils'].getSessionToken(app);
+
+      const res = await fetch(`${GATEWAY_URL}/api/auth/shopify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ shopOrigin, sessionToken })
+      });
+
+      if (!res.ok) return false;
+
+      const data = await res.json();
+      dashboardToken = data.token;
+      sessionStorage.setItem(TOKEN_KEY, dashboardToken);
+      return true;
+    } catch (e) {
+      console.warn('Shopify auth failed, falling back to password login:', e.message);
+      return false;
+    }
+  }
+
+  function showDashboard() {
+    document.getElementById('login-screen').classList.add('hidden');
+    document.getElementById('main-content').classList.remove('hidden');
+  }
+
+  // ── Init ──────────────────────────────────────────────────────────────────
+
+  (async function init() {
+    // If we already have a stored token, go straight to dashboard
+    if (dashboardToken) {
+      showDashboard();
+      loadSubmissions();
+      return;
+    }
+
+    // Try Shopify App Bridge if we're inside an iframe with the right params
+    const inShopify = await tryShopifyAuth();
+    if (inShopify) {
+      showDashboard();
+      loadSubmissions();
+    }
+    // Otherwise, login screen is already visible — wait for user
+  })();
+
+  // ── Load submissions ──────────────────────────────────────────────────────
+
+  async function loadSubmissions(page = currentPage) {
+    const tbody = document.getElementById('table-body');
+    tbody.innerHTML = '<tr><td colspan="4" class="p-4 text-center text-gray-500">Loading…</td></tr>';
+
+    try {
+      const res = await fetch(`${GATEWAY_URL}/api/submissions?limit=20&page=${page}`, {
+        headers: {
+          'Authorization': `Bearer ${dashboardToken}`,
+          'Content-Type': 'application/json'
         }
+      });
 
-        async function loadSubmissions() {
-            const tbody = document.getElementById('table-body');
-            tbody.innerHTML = '<tr><td colspan="4" class="p-4 text-center">Loading...</td></tr>';
+      // If token expired, force re-login
+      if (res.status === 401) {
+        sessionStorage.removeItem(TOKEN_KEY);
+        dashboardToken = null;
+        doLogout();
+        return;
+      }
 
-            try {
-                if (!dashboardToken) {
-                    await authenticateWithGateway();
-                }
-                const res = await fetch(`${GATEWAY_URL}/api/submissions?limit=50`, {
-                    method: 'GET',
-                    headers: {
-                        'Authorization': `Bearer ${dashboardToken}`,
-                        'Content-Type': 'application/json'
-                    }
-                });
+      const json = await res.json();  // read body ONCE
 
-                console.log('Submissions response:', res.status, await res.text()); // DEBUG
+      if (!res.ok) {
+        throw new Error(json.error || `Server error ${res.status}`);
+      }
 
-                if (!res.ok) {
-                    const errorData = await res.json();
-                    throw new Error(errorData.error || `Server Error: ${res.status}`);
-                }
+      // Update pagination state
+      currentPage = json.metadata.current_page;
+      totalPages = json.metadata.total_pages;
+      updatePagination(json.metadata);
 
-                const json = await res.json();
-                console.log('✅ Data loaded:', json.data?.length || 0, 'records');
+      tbody.innerHTML = json.data.map(app => {
+        const photoArray = app.id_photo_path ? app.id_photo_path.split(',') : [];
+        const photoButtons = photoArray.map((p, i) => {
+          const fileName = p.split('/').pop();
+          const fullUrl = `${GATEWAY_URL}/view-uploads/${fileName}`;
+          return `<button onclick="openPreview('${fullUrl}', '${escHtml(app.full_name)}')"
+            class="bg-gray-100 hover:bg-blue-100 border border-gray-300 rounded px-2 py-1 text-xs flex items-center gap-1">
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+              <path d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+            </svg>
+            View ${i + 1}
+          </button>`;
+        }).join('');
 
-                tbody.innerHTML = json.data.map(app => {
-                    const photoArray = app.id_photo_path.split(',');
-                    return `
-                    <tr>
-                        <td class="px-6 py-4">
-                        <div class="text-sm font-medium text-gray-900">${app.full_name}</div>
-                        <div class="text-xs text-gray-500">${app.email_address}</div>
-                        </td>
-                        <td class="px-6 py-4 text-sm text-gray-500">${app.id_number}</td>
-                        <td class="px-6 py-4 text-sm">
-                        <div class="flex gap-2">
-                            ${photoArray.map((path, i) => {
-                        const fileName = path.split('/').pop();
-                        const fullUrl = `${GATEWAY_URL}/view-uploads/${fileName}`;
-                        return `
-                                    <button onclick="openPreview('${fullUrl}', '${app.full_name}')" 
-                                            class="bg-gray-100 hover:bg-blue-100 border border-gray-300 rounded px-2 py-1 text-xs flex items-center gap-1">
-                                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
-                                        View ${i + 1}
-                                    </button>
-                                `;
-                    }).join('')}
-                        </div>
-                        </td>
-                        <td class="px-6 py-4 text-sm">
-                        <button onclick="approve(${app.id})" class="bg-green-100 text-green-700 px-3 py-1 rounded-full font-bold hover:bg-green-200 mr-2">Approve</button>
-                        <button onclick="reject(${app.id})" class="bg-red-100 text-red-700 px-3 py-1 rounded-full font-bold hover:bg-red-200">Reject</button>
-                        </td>
-                    </tr>
-                    `;
-                }).join('');
-            } catch (e) {
-                console.error("Dashboard Fetch Error:", e);
-                tbody.innerHTML = `<tr><td colspan="4" class="p-4 text-center text-red-500">Error: ${e.message}</td></tr>`;
-            }
-        }
+        return `<tr>
+          <td class="px-6 py-4">
+            <div class="text-sm font-medium text-gray-900">${escHtml(app.full_name)}</div>
+            <div class="text-xs text-gray-500">${escHtml(app.email_address)}</div>
+          </td>
+          <td class="px-6 py-4 text-sm text-gray-500">${escHtml(app.id_number)}</td>
+          <td class="px-6 py-4 text-sm">
+            <div class="flex gap-2 flex-wrap">${photoButtons}</div>
+          </td>
+          <td class="px-6 py-4 text-sm">
+            <button onclick="updateStatus(${app.id}, 'approved')"
+              class="bg-green-100 text-green-700 px-3 py-1 rounded-full font-bold hover:bg-green-200 mr-2">Approve</button>
+            <button onclick="updateStatus(${app.id}, 'rejected')"
+              class="bg-red-100 text-red-700 px-3 py-1 rounded-full font-bold hover:bg-red-200">Reject</button>
+          </td>
+        </tr>`;
+      }).join('');
 
-        // --- Modal Control Functions ---
-        function openPreview(photoString, name) {
-            const modal = document.getElementById('image-modal');
-            const container = document.getElementById('modal-container');
-            const caption = document.getElementById('modal-caption');
+    } catch (e) {
+      console.error('loadSubmissions error:', e);
+      tbody.innerHTML = `<tr><td colspan="4" class="p-4 text-center text-red-500">Error: ${e.message}</td></tr>`;
+    }
+  }
 
-            // photoString is "uploads/id1.jpg,uploads/id2.jpg"
-            const photos = photoString.split(',');
-            container.innerHTML = '';
+  function updatePagination(meta) {
+    const el = document.getElementById('pagination-info');
+    el.classList.remove('hidden');
+    document.getElementById('current-page').textContent = meta.current_page;
+    document.getElementById('total-pages').textContent = meta.total_pages;
+    document.getElementById('total-items').textContent = meta.total_items;
+    document.getElementById('prev-btn').disabled = meta.current_page <= 1;
+    document.getElementById('next-btn').disabled = meta.current_page >= meta.total_pages;
+  }
 
-            photos.forEach(path => {
-                const fileName = path.split('/').pop();
-                const img = document.createElement('img');
-                img.src = `${GATEWAY_URL}/view-uploads/${fileName}`;
-                img.className = "max-h-[70vh] w-auto rounded shadow-xl border-2 border-white object-contain bg-gray-900";
-                container.appendChild(img);
-            });
+  function changePage(delta) {
+    const next = currentPage + delta;
+    if (next < 1 || next > totalPages) return;
+    loadSubmissions(next);
+  }
 
-            caption.innerText = `Reviewing IDs for: ${name}`;
-            modal.classList.remove('hidden');
-        }
+  async function updateStatus(id, status) {
+    if (!confirm(`${status === 'approved' ? 'Approve' : 'Reject'} application #${id}?`)) return;
+    try {
+      const res = await fetch(`${GATEWAY_URL}/api/submissions/${id}/status`, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${dashboardToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ status })
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Update failed');
+      loadSubmissions();
+    } catch (e) {
+      alert('Error: ' + e.message);
+    }
+  }
 
-        function closeModal() {
-            document.getElementById('image-modal').classList.add('hidden');
-        }
+  // ── Modal ─────────────────────────────────────────────────────────────────
 
-        // Close modal on 'Esc' key
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') closeModal();
-        });
+  function openPreview(photoUrl, name) {
+    const modal = document.getElementById('image-modal');
+    const container = document.getElementById('modal-container');
+    const caption = document.getElementById('modal-caption');
 
-        loadSubmissions();
-    </script>
+    container.innerHTML = '';
+    const img = document.createElement('img');
+    img.src = photoUrl;
+    img.className = 'max-h-[70vh] w-auto rounded shadow-xl border-2 border-white object-contain bg-gray-900';
+    container.appendChild(img);
+
+    caption.innerText = `Reviewing ID for: ${name}`;
+    modal.classList.remove('hidden');
+  }
+
+  function closeModal() {
+    document.getElementById('image-modal').classList.add('hidden');
+  }
+
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+
+  function escHtml(str) {
+    return String(str ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+</script>
 </body>
-
 </html>

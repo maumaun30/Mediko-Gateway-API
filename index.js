@@ -436,6 +436,23 @@ app.get("/api/submissions", (req, res) => {
   );
 });
 
+app.post('/api/auth/admin', express.json(), (req, res) => {
+  const { password } = req.body;
+  const adminPassword = process.env.ADMIN_DASHBOARD_PASSWORD;
+
+  if (!adminPassword || password !== adminPassword) {
+    return res.status(401).json({ error: 'Invalid password' });
+  }
+
+  const secret = process.env.DASHBOARD_JWT_SECRET || 'mediko-dashboard-secret-2026';
+  const token = jwt.sign(
+    { admin: true, exp: Math.floor(Date.now() / 1000) + 8 * 60 * 60 }, // 8h
+    secret
+  );
+
+  res.json({ token });
+});
+
 // ── Shopify App Bridge Auth ───────────────────────────────────────────────────
 app.post("/api/auth/shopify", express.json(), async (req, res) => {
   try {
