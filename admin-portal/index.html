@@ -33,6 +33,31 @@
     </div>
   </div>
 
+  <!-- Filters -->
+  <div class="bg-white shadow rounded-lg p-4 mb-4 flex flex-wrap items-end gap-3">
+    <div class="flex-1 min-w-[200px]">
+      <label class="block text-xs font-medium text-gray-600 mb-1">Search</label>
+      <input id="search-input" type="text" placeholder="Name, email, or ID number"
+        class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+    </div>
+    <div>
+      <label class="block text-xs font-medium text-gray-600 mb-1">From</label>
+      <input id="date-from" type="date"
+        class="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+    </div>
+    <div>
+      <label class="block text-xs font-medium text-gray-600 mb-1">To</label>
+      <input id="date-to" type="date"
+        class="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+    </div>
+    <div class="flex gap-2">
+      <button onclick="applyFilters()"
+        class="bg-blue-600 text-white px-4 py-2 rounded shadow hover:bg-blue-700 text-sm">Apply</button>
+      <button onclick="clearFilters()"
+        class="bg-gray-200 text-gray-700 px-4 py-2 rounded shadow hover:bg-gray-300 text-sm">Clear</button>
+    </div>
+  </div>
+
   <!-- Pagination info -->
   <div id="pagination-info" class="text-sm text-gray-500 mb-3 hidden">
     Page <span id="current-page">1</span> of <span id="total-pages">1</span>
@@ -76,6 +101,7 @@
   let dashboardToken = sessionStorage.getItem(TOKEN_KEY) || null;
   let currentPage = 1;
   let totalPages = 1;
+  let currentFilters = { search: '', date_from: '', date_to: '' };
 
   // ── Auth ──────────────────────────────────────────────────────────────────
 
@@ -185,7 +211,12 @@
     tbody.innerHTML = '<tr><td colspan="4" class="p-4 text-center text-gray-500">Loading…</td></tr>';
 
     try {
-      const res = await fetch(`${GATEWAY_URL}/api/submissions?limit=20&page=${page}`, {
+      const params = new URLSearchParams({ limit: 20, page });
+      if (currentFilters.search) params.set('search', currentFilters.search);
+      if (currentFilters.date_from) params.set('date_from', currentFilters.date_from);
+      if (currentFilters.date_to) params.set('date_to', currentFilters.date_to);
+
+      const res = await fetch(`${GATEWAY_URL}/api/submissions?${params.toString()}`, {
         headers: {
           'Authorization': `Bearer ${dashboardToken}`,
           'Content-Type': 'application/json'
@@ -210,6 +241,11 @@
       currentPage = json.metadata.current_page;
       totalPages = json.metadata.total_pages;
       updatePagination(json.metadata);
+
+      if (!json.data.length) {
+        tbody.innerHTML = '<tr><td colspan="4" class="p-4 text-center text-gray-500">No applications match the current filters.</td></tr>';
+        return;
+      }
 
       tbody.innerHTML = json.data.map(app => {
         const photoArray = app.id_photo_path ? app.id_photo_path.split(',') : [];
@@ -267,6 +303,35 @@
     if (next < 1 || next > totalPages) return;
     loadSubmissions(next);
   }
+
+  // ── Filters ───────────────────────────────────────────────────────────────
+
+  function applyFilters() {
+    currentFilters = {
+      search: document.getElementById('search-input').value.trim(),
+      date_from: document.getElementById('date-from').value,
+      date_to: document.getElementById('date-to').value,
+    };
+    currentPage = 1;
+    loadSubmissions(1);
+  }
+
+  function clearFilters() {
+    document.getElementById('search-input').value = '';
+    document.getElementById('date-from').value = '';
+    document.getElementById('date-to').value = '';
+    currentFilters = { search: '', date_from: '', date_to: '' };
+    currentPage = 1;
+    loadSubmissions(1);
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('search-input')?.addEventListener('keydown', e => {
+      if (e.key === 'Enter') applyFilters();
+    });
+    document.getElementById('date-from')?.addEventListener('change', applyFilters);
+    document.getElementById('date-to')?.addEventListener('change', applyFilters);
+  });
 
 
 

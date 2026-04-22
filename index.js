@@ -396,8 +396,36 @@ app.get("/api/submissions", (req, res) => {
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
   const offset = (page - 1) * limit;
 
+  const search = (req.query.search || "").trim();
+  const dateFrom = (req.query.date_from || "").trim();
+  const dateTo = (req.query.date_to || "").trim();
+
+  const whereClauses = [];
+  const whereParams = [];
+
+  if (search) {
+    whereClauses.push(
+      "(full_name LIKE ? OR email_address LIKE ? OR id_number LIKE ?)",
+    );
+    const like = `%${search}%`;
+    whereParams.push(like, like, like);
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateFrom)) {
+    whereClauses.push("created_at >= ?");
+    whereParams.push(`${dateFrom} 00:00:00`);
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {
+    whereClauses.push("created_at <= ?");
+    whereParams.push(`${dateTo} 23:59:59`);
+  }
+
+  const whereSql = whereClauses.length
+    ? ` WHERE ${whereClauses.join(" AND ")}`
+    : "";
+
   db.query(
-    "SELECT COUNT(*) AS total FROM applications",
+    `SELECT COUNT(*) AS total FROM applications${whereSql}`,
+    whereParams,
     (countErr, countResult) => {
       if (countErr) {
         log("error", "db_count_failed", { message: countErr.message });
@@ -407,8 +435,8 @@ app.get("/api/submissions", (req, res) => {
       const totalItems = countResult[0].total;
 
       db.query(
-        "SELECT * FROM applications ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        [limit, offset],
+        `SELECT * FROM applications${whereSql} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+        [...whereParams, limit, offset],
         (err, results) => {
           if (err) {
             log("error", "db_select_failed", { message: err.message });
@@ -419,6 +447,9 @@ app.get("/api/submissions", (req, res) => {
             page,
             limit,
             totalItems,
+            search: search || null,
+            date_from: dateFrom || null,
+            date_to: dateTo || null,
             ip: req.ip,
           });
 
