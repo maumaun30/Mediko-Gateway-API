@@ -73,9 +73,12 @@
       <thead class="bg-gray-100">
         <tr>
           <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Applicant</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Contact</th>
           <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">ID Number</th>
           <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Photos</th>
           <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date Submitted</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
         </tr>
       </thead>
       <tbody id="table-body" class="divide-y divide-gray-200"></tbody>
@@ -208,7 +211,7 @@
 
   async function loadSubmissions(page = currentPage) {
     const tbody = document.getElementById('table-body');
-    tbody.innerHTML = '<tr><td colspan="4" class="p-4 text-center text-gray-500">Loading…</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="p-4 text-center text-gray-500">Loading…</td></tr>';
 
     try {
       const params = new URLSearchParams({ limit: 20, page });
@@ -243,7 +246,7 @@
       updatePagination(json.metadata);
 
       if (!json.data.length) {
-        tbody.innerHTML = '<tr><td colspan="4" class="p-4 text-center text-gray-500">No applications match the current filters.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="p-4 text-center text-gray-500">No applications match the current filters.</td></tr>';
         return;
       }
 
@@ -269,22 +272,32 @@
             })
           : '—';
 
+        const status = app.status || 'pending';
+
         return `<tr>
           <td class="px-6 py-4">
             <div class="text-sm font-medium text-gray-900">${escHtml(app.full_name)}</div>
             <div class="text-xs text-gray-500">${escHtml(app.email_address)}</div>
           </td>
+          <td class="px-6 py-4 text-sm text-gray-500 whitespace-nowrap">${escHtml(app.contact_number)}</td>
           <td class="px-6 py-4 text-sm text-gray-500">${escHtml(app.id_number)}</td>
           <td class="px-6 py-4 text-sm">
             <div class="flex gap-2 flex-wrap">${photoButtons}</div>
           </td>
           <td class="px-6 py-4 text-sm text-gray-500 whitespace-nowrap">${submittedAt}</td>
+          <td class="px-6 py-4 text-sm">
+            ${statusBadge(status)}
+            ${app.discount_code ? `<div class="mt-1 text-xs font-mono text-gray-700">${escHtml(app.discount_code)}</div>` : ''}
+          </td>
+          <td class="px-6 py-4 text-sm">
+            <div class="flex gap-1 flex-wrap">${statusActions(app.id, status)}</div>
+          </td>
         </tr>`;
       }).join('');
 
     } catch (e) {
       console.error('loadSubmissions error:', e);
-      tbody.innerHTML = `<tr><td colspan="4" class="p-4 text-center text-red-500">Error: ${e.message}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" class="p-4 text-center text-red-500">Error: ${e.message}</td></tr>`;
     }
   }
 
@@ -334,6 +347,56 @@
   });
 
 
+
+  // ── Status ────────────────────────────────────────────────────────────────
+
+  function statusBadge(status) {
+    const styles = {
+      pending:  'bg-yellow-100 text-yellow-800',
+      approved: 'bg-green-100 text-green-800',
+      rejected: 'bg-red-100 text-red-800',
+    };
+    const cls = styles[status] || styles.pending;
+    return `<span class="inline-block px-2 py-1 rounded text-xs font-medium ${cls}">${escHtml(status)}</span>`;
+  }
+
+  function statusActions(id, status) {
+    if (status === 'pending') {
+      return `
+        <button onclick="setStatus(${id}, 'approved')" class="px-2 py-1 bg-green-600 text-white rounded text-xs hover:bg-green-700">Approve</button>
+        <button onclick="setStatus(${id}, 'rejected')" class="px-2 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-700">Reject</button>
+      `;
+    }
+    return `<button onclick="setStatus(${id}, 'pending')" class="px-2 py-1 bg-gray-200 text-gray-700 rounded text-xs hover:bg-gray-300">Revert</button>`;
+  }
+
+  async function setStatus(id, status) {
+    try {
+      const res = await fetch(`${GATEWAY_URL}/api/submissions/${id}/status`, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${dashboardToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ status })
+      });
+
+      if (res.status === 401) {
+        sessionStorage.removeItem(TOKEN_KEY);
+        dashboardToken = null;
+        doLogout();
+        return;
+      }
+
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || `Server error ${res.status}`);
+
+      loadSubmissions(currentPage);
+    } catch (e) {
+      console.error('setStatus error:', e);
+      alert(`Failed to update status: ${e.message}`);
+    }
+  }
 
   // ── Modal ─────────────────────────────────────────────────────────────────
 

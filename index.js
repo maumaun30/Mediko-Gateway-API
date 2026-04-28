@@ -4,6 +4,7 @@ const mysql = require("mysql2");
 const multer = require("multer");
 const nodemailer = require("nodemailer");
 const path = require("path");
+const crypto = require("crypto");
 const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 const jwt = require("jsonwebtoken");
@@ -39,7 +40,7 @@ app.use(
         callback(new Error("Not allowed by CORS Policy"));
       }
     },
-    methods: ["GET", "POST", "OPTIONS"],
+    methods: ["GET", "POST", "PATCH", "OPTIONS"],
     allowedHeaders: ["Content-Type", "x-api-key", "Authorization"],
     optionsSuccessStatus: 200,
   }),
@@ -106,8 +107,37 @@ db.getConnection((err, conn) => {
   } else {
     log("info", "db_connected");
     conn.release();
+    ensureStatusColumn();
   }
 });
+
+function ensureColumn(name, definition) {
+  db.query(
+    `SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'applications' AND COLUMN_NAME = ?`,
+    [process.env.DB_NAME, name],
+    (err, rows) => {
+      if (err) {
+        log("error", "migration_check_failed", { column: name, message: err.message });
+        return;
+      }
+      if (rows[0].c > 0) return;
+      db.query(`ALTER TABLE applications ADD COLUMN ${name} ${definition}`, (alterErr) => {
+        if (alterErr) {
+          log("error", "migration_failed", { column: name, message: alterErr.message });
+        } else {
+          log("info", "migration_applied", { column: name });
+        }
+      });
+    },
+  );
+}
+
+function ensureStatusColumn() {
+  ensureColumn("status", "ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending'");
+  ensureColumn("discount_code", "VARCHAR(64) NULL");
+  ensureColumn("discount_price_rule_id", "BIGINT NULL");
+}
 
 // ── Mailer ────────────────────────────────────────────────────────────────────
 const transporter = nodemailer.createTransport({
@@ -215,6 +245,153 @@ async function sendApplicationEmails(application, reqFiles, metadataStr) {
   } catch (err) {
     log("error", "email_send_failed", {
       appId: insertId,
+      message: err.message,
+    });
+  }
+}
+
+// ── Shopify Admin API ─────────────────────────────────────────────────────────
+const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2024-10";
+const DISCOUNT_PERCENTAGE = parseFloat(process.env.DISCOUNT_PERCENTAGE || "20");
+
+function shopifyConfigured() {
+  return Boolean(
+    process.env.SHOPIFY_SHOP_DOMAIN && process.env.SHOPIFY_ADMIN_TOKEN,
+  );
+}
+
+async function shopifyFetch(method, pathSuffix, body) {
+  const url = `https://${process.env.SHOPIFY_SHOP_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}${pathSuffix}`;
+  const res = await fetch(url, {
+    method,
+    headers: {
+      "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  if (res.status === 204) return null;
+
+  const text = await res.text();
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    /* not JSON */
+  }
+
+  if (!res.ok) {
+    const msg =
+      (json && (json.errors || json.error)) || `Shopify ${res.status}`;
+    const err = new Error(
+      typeof msg === "string" ? msg : JSON.stringify(msg),
+    );
+    err.status = res.status;
+    throw err;
+  }
+  return json;
+}
+
+async function findOrCreateShopifyCustomer(applicant) {
+  const emailQuery = encodeURIComponent(`email:${applicant.email_address}`);
+  const search = await shopifyFetch(
+    "GET",
+    `/customers/search.json?query=${emailQuery}`,
+  );
+  if (search?.customers?.length) {
+    return search.customers[0].id;
+  }
+
+  const [firstName, ...rest] = (applicant.full_name || "").trim().split(/\s+/);
+  const lastName = rest.join(" ") || firstName;
+
+  const created = await shopifyFetch("POST", "/customers.json", {
+    customer: {
+      email: applicant.email_address,
+      first_name: firstName,
+      last_name: lastName,
+      phone: applicant.contact_number,
+      tags: "senior-pwd-discount",
+      verified_email: true,
+    },
+  });
+  return created.customer.id;
+}
+
+function generateDiscountCode(appId) {
+  const rand = crypto.randomBytes(4).toString("hex").toUpperCase();
+  return `MEDIKO-${appId}-${rand}`;
+}
+
+async function createDiscountForApplicant(applicant) {
+  const customerId = await findOrCreateShopifyCustomer(applicant);
+
+  const priceRule = await shopifyFetch("POST", "/price_rules.json", {
+    price_rule: {
+      title: `Mediko Senior/PWD - App #${applicant.id}`,
+      target_type: "line_item",
+      target_selection: "all",
+      allocation_method: "across",
+      value_type: "percentage",
+      value: `-${DISCOUNT_PERCENTAGE}`,
+      customer_selection: "prerequisite",
+      prerequisite_customer_ids: [customerId],
+      starts_at: new Date().toISOString(),
+    },
+  });
+
+  const code = generateDiscountCode(applicant.id);
+  await shopifyFetch(
+    "POST",
+    `/price_rules/${priceRule.price_rule.id}/discount_codes.json`,
+    { discount_code: { code } },
+  );
+
+  return { code, priceRuleId: priceRule.price_rule.id };
+}
+
+async function deleteDiscountPriceRule(priceRuleId) {
+  await shopifyFetch("DELETE", `/price_rules/${priceRuleId}.json`);
+}
+
+// ── Approval email ────────────────────────────────────────────────────────────
+async function sendApprovalEmail(applicant, code) {
+  const mail = {
+    from: `"Mediko.ph" <${process.env.MAIL_FROM}>`,
+    to: applicant.email_address,
+    subject: "Your Mediko.ph Senior/PWD Discount is Approved",
+    html: `
+      <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
+        <h2 style="color: #2c3e50;">Hello ${applicant.full_name},</h2>
+        <p>Good news — your Senior Citizen / PWD discount application has been <strong>approved</strong>.</p>
+
+        <div style="background-color: #f0fdf4; border: 1px solid #16a34a; padding: 20px; border-radius: 8px; margin: 20px 0; text-align: center;">
+          <p style="margin: 0 0 8px 0; color: #555;">Your personal discount code:</p>
+          <p style="margin: 0; font-size: 28px; font-weight: bold; color: #15803d; letter-spacing: 2px;">${code}</p>
+          <p style="margin: 12px 0 0 0; font-size: 13px; color: #555;">${DISCOUNT_PERCENTAGE}% off — tied to your email address.</p>
+        </div>
+
+        <p><strong>How to use it:</strong></p>
+        <ol>
+          <li>Add your items to the cart on <a href="https://mediko.ph">mediko.ph</a>.</li>
+          <li>At checkout, enter the email address you used to apply: <strong>${applicant.email_address}</strong>.</li>
+          <li>Paste the code <strong>${code}</strong> in the discount field and apply.</li>
+        </ol>
+
+        <p style="font-size: 13px; color: #777;">This code is permanently linked to your email. Keep this email for your records.</p>
+        <p>Stay healthy!<br><strong>Mediko.ph Team</strong></p>
+      </div>
+    `,
+  };
+
+  try {
+    await transporter.sendMail(mail);
+    log("info", "approval_email_sent", { appId: applicant.id });
+  } catch (err) {
+    log("error", "approval_email_failed", {
+      appId: applicant.id,
       message: err.message,
     });
   }
@@ -465,6 +642,104 @@ app.get("/api/submissions", (req, res) => {
       );
     },
   );
+});
+
+// ── PATCH /api/submissions/:id/status ────────────────────────────────────────
+const queryAsync = (sql, params) =>
+  new Promise((resolve, reject) =>
+    db.query(sql, params, (err, rows) => (err ? reject(err) : resolve(rows))),
+  );
+
+app.patch("/api/submissions/:id/status", async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Missing Bearer token" });
+    }
+    const token = authHeader.split(" ")[1];
+    const secret =
+      process.env.DASHBOARD_JWT_SECRET || "mediko-dashboard-secret-2026";
+    jwt.verify(token, secret);
+  } catch {
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+
+  const id = parseInt(req.params.id, 10);
+  const { status } = req.body || {};
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: "Invalid id" });
+  }
+  if (!["pending", "approved", "rejected"].includes(status)) {
+    return res.status(400).json({ error: "Invalid status" });
+  }
+
+  try {
+    const rows = await queryAsync(
+      "SELECT * FROM applications WHERE id = ?",
+      [id],
+    );
+    if (!rows.length) {
+      return res.status(404).json({ error: "Application not found" });
+    }
+    const applicant = rows[0];
+
+    // Approving a pending row: create the Shopify discount.
+    if (status === "approved" && applicant.status !== "approved") {
+      if (!shopifyConfigured()) {
+        return res.status(503).json({
+          error:
+            "Shopify is not configured. Set SHOPIFY_SHOP_DOMAIN and SHOPIFY_ADMIN_TOKEN.",
+        });
+      }
+      const { code, priceRuleId } = await createDiscountForApplicant(applicant);
+      await queryAsync(
+        `UPDATE applications
+           SET status = 'approved', discount_code = ?, discount_price_rule_id = ?
+           WHERE id = ?`,
+        [code, priceRuleId, id],
+      );
+      log("info", "submission_approved", { id, code, ip: req.ip });
+
+      // Best-effort email; don't fail the request if it bounces.
+      sendApprovalEmail(applicant, code);
+
+      return res.json({ success: true, id, status: "approved", code });
+    }
+
+    // Reverting or rejecting a previously-approved row: delete the discount.
+    if (status !== "approved" && applicant.discount_price_rule_id) {
+      try {
+        await deleteDiscountPriceRule(applicant.discount_price_rule_id);
+      } catch (e) {
+        log("warn", "shopify_delete_failed", {
+          id,
+          priceRuleId: applicant.discount_price_rule_id,
+          message: e.message,
+        });
+      }
+      await queryAsync(
+        `UPDATE applications
+           SET status = ?, discount_code = NULL, discount_price_rule_id = NULL
+           WHERE id = ?`,
+        [status, id],
+      );
+    } else {
+      await queryAsync("UPDATE applications SET status = ? WHERE id = ?", [
+        status,
+        id,
+      ]);
+    }
+
+    log("info", "submission_status_updated", { id, status, ip: req.ip });
+    res.json({ success: true, id, status });
+  } catch (err) {
+    log("error", "status_update_failed", {
+      id,
+      status,
+      message: err.message,
+    });
+    res.status(502).json({ error: err.message });
+  }
 });
 
 app.post('/api/auth/admin', express.json(), (req, res) => {
