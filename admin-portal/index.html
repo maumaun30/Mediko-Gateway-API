@@ -548,6 +548,17 @@
         ${app.discount_code ? `<div class="mt-1 text-xs font-mono text-gray-700">${escHtml(app.discount_code)}</div>` : ''}
       </td>
       <td class="px-6 py-4 text-sm">
+        ${statusBadge(status)}
+        ${app.discount_code ? `
+          <div class="mt-1 text-xs font-mono text-gray-700">${escHtml(app.discount_code)}</div>
+          <button onclick="checkUsage(${app.id}, this)"
+            class="mt-1 px-2 py-1 bg-gray-100 border border-gray-300 rounded text-xs hover:bg-gray-200">
+            Check Usage
+          </button>
+          <span id="usage-${app.id}" class="ml-1 text-xs font-semibold"></span>
+        ` : ''}
+      </td>
+      <td class="px-6 py-4 text-sm">
         <div class="flex gap-1 flex-wrap">${applicationActions(app.id, status)}</div>
       </td>
     </tr>`;
@@ -677,6 +688,30 @@
       } finally {
         btn.disabled = false;
         btn.textContent = 'Confirm Reject';
+      }
+    }
+
+    async function checkUsage(id, btn) {
+      btn.disabled = true;
+      btn.textContent = 'Checking…';
+      try {
+        const res = await fetch(`${GATEWAY_URL}/api/submissions/${id}/discount-usage`, {
+          headers: { 'Authorization': `Bearer ${dashboardToken}` }
+        });
+        const json = await res.json();
+        const el = document.getElementById(`usage-${id}`);
+        if (json.used) {
+          el.textContent = '✓ Used';
+          el.className = 'ml-1 text-xs font-semibold text-red-600';
+        } else {
+          el.textContent = '✓ Not yet used';
+          el.className = 'ml-1 text-xs font-semibold text-green-600';
+        }
+        btn.textContent = 'Refresh';
+        btn.disabled = false;
+      } catch (e) {
+        btn.textContent = 'Error';
+        btn.disabled = false;
       }
     }
 
