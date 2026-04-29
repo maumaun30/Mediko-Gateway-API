@@ -460,20 +460,14 @@ async function createDiscountForApplicant(applicant) {
   });
 
   const code = generateDiscountCode(applicant.id);
-  await shopifyFetch(
-    "POST",
-    `/price_rules/${priceRule.price_rule.id}/discount_codes.json`,
-    { discount_code: { code, usage_limit: 1 } },
-  );
-
   const codeRes = await shopifyFetch(
     "POST",
     `/price_rules/${priceRule.price_rule.id}/discount_codes.json`,
-    { discount_code: { code } }
+    { discount_code: { code } },
   );
 
-  return { 
-    code, 
+  return {
+    code,
     priceRuleId: priceRule.price_rule.id,
     discountCodeId: codeRes.discount_code.id,
   };
@@ -1316,7 +1310,7 @@ app.patch("/api/submissions/:id/status", async (req, res) => {
             "Shopify is not configured. Set SHOPIFY_SHOP_DOMAIN and SHOPIFY_ADMIN_TOKEN.",
         });
       }
-      const { code, priceRuleId } = await createDiscountForApplicant(applicant);
+      const { code, priceRuleId, discountCodeId } = await createDiscountForApplicant(applicant);
       await queryAsync(
         `UPDATE applications
           SET status = 'approved', discount_code = ?, discount_price_rule_id = ?, discount_code_id = ?, rejection_reason = NULL
@@ -1346,7 +1340,7 @@ app.patch("/api/submissions/:id/status", async (req, res) => {
       }
       await queryAsync(
         `UPDATE applications
-           SET status = ?, discount_code = NULL, discount_price_rule_id = NULL, rejection_reason = ?
+           SET status = ?, discount_code = NULL, discount_price_rule_id = NULL, discount_price_rule_id = NULL, rejection_reason = ?
            WHERE id = ?`,
         [status, status === "rejected" ? trimmedReason : null, id],
       );
