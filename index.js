@@ -142,32 +142,38 @@ db.getConnection((err, conn) => {
   }
 });
 
-function ensureColumn(name, definition) {
+function ensureColumnFor(table, name, definition) {
   db.query(
     `SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS
-     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'applications' AND COLUMN_NAME = ?`,
-    [process.env.DB_NAME, name],
+     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+    [process.env.DB_NAME, table, name],
     (err, rows) => {
       if (err) {
-        log("error", "migration_check_failed", { column: name, message: err.message });
+        log("error", "migration_check_failed", { table, column: name, message: err.message });
         return;
       }
       if (rows[0].c > 0) return;
-      db.query(`ALTER TABLE applications ADD COLUMN ${name} ${definition}`, (alterErr) => {
+      db.query(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`, (alterErr) => {
         if (alterErr) {
-          log("error", "migration_failed", { column: name, message: alterErr.message });
+          log("error", "migration_failed", { table, column: name, message: alterErr.message });
         } else {
-          log("info", "migration_applied", { column: name });
+          log("info", "migration_applied", { table, column: name });
         }
       });
     },
   );
 }
 
+function ensureColumn(name, definition) {
+  ensureColumnFor("applications", name, definition);
+}
+
 function ensureStatusColumn() {
   ensureColumn("status", "ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending'");
   ensureColumn("discount_code", "VARCHAR(64) NULL");
   ensureColumn("discount_price_rule_id", "BIGINT NULL");
+  ensureColumn("rejection_reason", "TEXT NULL");
+  ensureColumnFor("return_requests", "rejection_reason", "TEXT NULL");
 }
 
 function ensureContactTable() {
@@ -438,6 +444,11 @@ async function createDiscountForApplicant(applicant) {
       customer_selection: "prerequisite",
       prerequisite_customer_ids: [customerId],
       starts_at: new Date().toISOString(),
+      combines_with: {
+        product_discounts: true,
+        order_discounts: true,
+        shipping_discounts: true,
+      },
     },
   });
 
@@ -490,6 +501,42 @@ async function sendApprovalEmail(applicant, code) {
     log("info", "approval_email_sent", { appId: applicant.id });
   } catch (err) {
     log("error", "approval_email_failed", {
+      appId: applicant.id,
+      message: err.message,
+    });
+  }
+}
+
+async function sendRejectionEmail(applicant, reason) {
+  const reasonHtml = reason
+    ? `<div style="background-color: #fef2f2; border: 1px solid #dc2626; padding: 15px; border-radius: 8px; margin: 20px 0;">
+         <strong style="color: #991b1b;">Reason:</strong>
+         <pre style="white-space: pre-wrap; font-family: inherit; margin: 8px 0 0 0; color: #7f1d1d;">${escapeHtml(reason)}</pre>
+       </div>`
+    : "";
+
+  const mail = {
+    from: `"Mediko.ph" <${process.env.MAIL_FROM}>`,
+    to: applicant.email_address,
+    subject: "Update on your Mediko.ph Senior/PWD discount application",
+    html: `
+      <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
+        <h2 style="color: #2c3e50;">Hello ${escapeHtml(applicant.full_name)},</h2>
+        <p>Thank you for applying for the Senior Citizen / PWD discount on Mediko.ph.</p>
+        <p>After reviewing your submission, we are unable to approve your application at this time.</p>
+        ${reasonHtml}
+        <p>If you believe this was a mistake or need help, please reply to this email or contact our support team and we'll be happy to assist.</p>
+        <p>Reference ID: #${applicant.id}</p>
+        <p>Stay healthy,<br><strong>Mediko.ph Team</strong></p>
+      </div>
+    `,
+  };
+
+  try {
+    await transporter.sendMail(mail);
+    log("info", "rejection_email_sent", { appId: applicant.id });
+  } catch (err) {
+    log("error", "rejection_email_failed", {
       appId: applicant.id,
       message: err.message,
     });
@@ -678,6 +725,39 @@ async function sendReturnApprovalEmail(returnReq) {
     log("info", "return_approval_email_sent", { id: returnReq.id });
   } catch (err) {
     log("error", "return_approval_email_failed", { id: returnReq.id, message: err.message });
+  }
+}
+
+async function sendReturnRejectionEmail(returnReq, reason) {
+  const reasonHtml = reason
+    ? `<div style="background-color: #fef2f2; border: 1px solid #dc2626; padding: 15px; border-radius: 8px; margin: 20px 0;">
+         <strong style="color: #991b1b;">Reason:</strong>
+         <pre style="white-space: pre-wrap; font-family: inherit; margin: 8px 0 0 0; color: #7f1d1d;">${escapeHtml(reason)}</pre>
+       </div>`
+    : "";
+
+  const mail = {
+    from: `"Mediko.ph" <${process.env.MAIL_FROM}>`,
+    to: returnReq.email_address,
+    subject: `Update on your return request #${returnReq.id} — Mediko.ph`,
+    html: `
+      <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
+        <h2 style="color: #2c3e50;">Hello ${escapeHtml(returnReq.full_name)},</h2>
+        <p>Thank you for submitting a return request for order <strong>${escapeHtml(returnReq.order_number)}</strong>.</p>
+        <p>After reviewing your request, we are unable to approve this return at this time.</p>
+        ${reasonHtml}
+        <p>If you have questions or believe this was made in error, please reply to this email or contact our support team.</p>
+        <p>Reference ID: #${returnReq.id}</p>
+        <p>Thank you,<br><strong>Mediko.ph Team</strong></p>
+      </div>
+    `,
+  };
+
+  try {
+    await transporter.sendMail(mail);
+    log("info", "return_rejection_email_sent", { id: returnReq.id });
+  } catch (err) {
+    log("error", "return_rejection_email_failed", { id: returnReq.id, message: err.message });
   }
 }
 
@@ -1180,12 +1260,20 @@ app.patch("/api/submissions/:id/status", async (req, res) => {
   }
 
   const id = parseInt(req.params.id, 10);
-  const { status } = req.body || {};
+  const { status, reason } = req.body || {};
   if (!Number.isInteger(id) || id < 1) {
     return res.status(400).json({ error: "Invalid id" });
   }
   if (!["pending", "approved", "rejected"].includes(status)) {
     return res.status(400).json({ error: "Invalid status" });
+  }
+
+  const trimmedReason =
+    typeof reason === "string" ? reason.trim().slice(0, 2000) : "";
+  if (status === "rejected" && trimmedReason.length < 5) {
+    return res
+      .status(400)
+      .json({ error: "A rejection reason of at least 5 characters is required." });
   }
 
   try {
@@ -1209,7 +1297,7 @@ app.patch("/api/submissions/:id/status", async (req, res) => {
       const { code, priceRuleId } = await createDiscountForApplicant(applicant);
       await queryAsync(
         `UPDATE applications
-           SET status = 'approved', discount_code = ?, discount_price_rule_id = ?
+           SET status = 'approved', discount_code = ?, discount_price_rule_id = ?, rejection_reason = NULL
            WHERE id = ?`,
         [code, priceRuleId, id],
       );
@@ -1220,6 +1308,8 @@ app.patch("/api/submissions/:id/status", async (req, res) => {
 
       return res.json({ success: true, id, status: "approved", code });
     }
+
+    const wasRejected = applicant.status === "rejected";
 
     // Reverting or rejecting a previously-approved row: delete the discount.
     if (status !== "approved" && applicant.discount_price_rule_id) {
@@ -1234,15 +1324,19 @@ app.patch("/api/submissions/:id/status", async (req, res) => {
       }
       await queryAsync(
         `UPDATE applications
-           SET status = ?, discount_code = NULL, discount_price_rule_id = NULL
+           SET status = ?, discount_code = NULL, discount_price_rule_id = NULL, rejection_reason = ?
            WHERE id = ?`,
-        [status, id],
+        [status, status === "rejected" ? trimmedReason : null, id],
       );
     } else {
-      await queryAsync("UPDATE applications SET status = ? WHERE id = ?", [
-        status,
-        id,
-      ]);
+      await queryAsync(
+        "UPDATE applications SET status = ?, rejection_reason = ? WHERE id = ?",
+        [status, status === "rejected" ? trimmedReason : null, id],
+      );
+    }
+
+    if (status === "rejected" && !wasRejected) {
+      sendRejectionEmail(applicant, trimmedReason);
     }
 
     log("info", "submission_status_updated", { id, status, ip: req.ip });
@@ -1459,25 +1553,41 @@ app.get("/api/return-requests", requireAdmin, async (req, res) => {
 // ── PATCH /api/return-requests/:id/status ────────────────────────────────────
 app.patch("/api/return-requests/:id/status", requireAdmin, async (req, res) => {
   const id = parseInt(req.params.id, 10);
-  const { status } = req.body || {};
+  const { status, reason } = req.body || {};
   if (!Number.isInteger(id) || id < 1) {
     return res.status(400).json({ error: "Invalid id" });
   }
   if (!["pending", "approved", "rejected"].includes(status)) {
     return res.status(400).json({ error: "Invalid status" });
   }
+
+  const trimmedReason =
+    typeof reason === "string" ? reason.trim().slice(0, 2000) : "";
+  if (status === "rejected" && trimmedReason.length < 5) {
+    return res
+      .status(400)
+      .json({ error: "A rejection reason of at least 5 characters is required." });
+  }
+
   try {
     const rows = await queryAsync("SELECT * FROM return_requests WHERE id = ?", [id]);
     if (!rows.length) {
       return res.status(404).json({ error: "Return request not found" });
     }
     const returnReq = rows[0];
+    const wasRejected = returnReq.status === "rejected";
 
-    await queryAsync("UPDATE return_requests SET status = ? WHERE id = ?", [status, id]);
+    await queryAsync(
+      "UPDATE return_requests SET status = ?, rejection_reason = ? WHERE id = ?",
+      [status, status === "rejected" ? trimmedReason : null, id],
+    );
     log("info", "return_status_updated", { id, status, ip: req.ip });
 
     if (status === "approved" && returnReq.status !== "approved") {
       sendReturnApprovalEmail(returnReq);
+    }
+    if (status === "rejected" && !wasRejected) {
+      sendReturnRejectionEmail(returnReq, trimmedReason);
     }
 
     res.json({ success: true, id, status });
