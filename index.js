@@ -136,7 +136,7 @@ db.getConnection((err, conn) => {
   } else {
     log("info", "db_connected");
     conn.release();
-    ensureStatusColumn();
+    // ensureStatusColumn();
     ensureContactTable();
     ensureReturnsTable();
   }
@@ -173,7 +173,7 @@ function ensureStatusColumn() {
   ensureColumn("discount_code", "VARCHAR(64) NULL");
   ensureColumn("discount_price_rule_id", "BIGINT NULL");
   ensureColumn("rejection_reason", "TEXT NULL");
-  ensureColumnFor("return_requests", "rejection_reason", "TEXT NULL");
+  // ensureColumnFor("return_requests", "rejection_reason", "TEXT NULL");
 }
 
 function ensureContactTable() {
@@ -209,6 +209,7 @@ function ensureReturnsTable() {
        reason TEXT NOT NULL,
        image_paths TEXT,
        status ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending',
+       rejection_reason TEXT NULL,
        metadata TEXT,
        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
        INDEX idx_returns_email (email_address),
@@ -217,7 +218,10 @@ function ensureReturnsTable() {
      )`,
     (err) => {
       if (err) log("error", "migration_returns_table_failed", { message: err.message });
-      else log("info", "migration_returns_table_ready");
+      else {
+        log("info", "migration_returns_table_ready");
+        ensureStatusColumn();
+      }
     },
   );
 }
