@@ -545,10 +545,6 @@
       <td class="px-6 py-4 text-sm text-gray-500 whitespace-nowrap">${formatDate(app.created_at)}</td>
       <td class="px-6 py-4 text-sm">
         ${statusBadge(status)}
-        ${app.discount_code ? `<div class="mt-1 text-xs font-mono text-gray-700">${escHtml(app.discount_code)}</div>` : ''}
-      </td>
-      <td class="px-6 py-4 text-sm">
-        ${statusBadge(status)}
         ${app.discount_code ? `
           <div class="mt-1 text-xs font-mono text-gray-700">${escHtml(app.discount_code)}</div>
           <button onclick="checkUsage(${app.id}, this)"
