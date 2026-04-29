@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --check \"c:/Web Projects/Mediko-Gateway-API/index.js\")"
+    ]
+  }
+}

@@ -1,435 +1,699 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Mediko Admin</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .tab-btn {
+      color: #6b7280;
+      border-bottom: 2px solid transparent;
+    }
+
+    .tab-btn.active-tab {
+      color: #1d4ed8;
+      border-bottom-color: #1d4ed8;
+    }
+
+    .tab-btn:hover:not(.active-tab) {
+      color: #374151;
+      background-color: #f9fafb;
+    }
+  </style>
 </head>
+
 <body class="bg-gray-50 p-6">
 
-<!-- Login overlay (shown when no token yet) -->
-<div id="login-screen" class="fixed inset-0 z-50 flex items-center justify-center bg-gray-100">
-  <div class="bg-white rounded-xl shadow-md p-8 w-full max-w-sm">
-    <h2 class="text-xl font-bold text-gray-800 mb-1">Mediko Admin</h2>
-    <p class="text-sm text-gray-500 mb-5">Enter your admin password to continue.</p>
-    <input id="pw-input" type="password" placeholder="Password"
-      class="w-full border border-gray-300 rounded px-3 py-2 mb-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
-    <p id="login-error" class="text-red-500 text-xs mb-2 hidden">Incorrect password.</p>
-    <button onclick="doLogin()"
-      class="w-full bg-blue-600 text-white py-2 rounded font-medium hover:bg-blue-700 text-sm">Login</button>
-  </div>
-</div>
-
-<!-- Main dashboard -->
-<div id="main-content" class="max-w-6xl mx-auto hidden">
-  <div class="flex justify-between items-center mb-6">
-    <h1 class="text-2xl font-bold text-gray-800">Discount Applications</h1>
-    <div class="flex gap-2">
-      <button onclick="loadSubmissions()"
-        class="bg-blue-600 text-white px-4 py-2 rounded shadow hover:bg-blue-700 text-sm">Refresh</button>
-      <button onclick="doLogout()"
-        class="bg-gray-200 text-gray-700 px-4 py-2 rounded shadow hover:bg-gray-300 text-sm">Logout</button>
+  <!-- Login overlay (shown when no token yet) -->
+  <div id="login-screen" class="fixed inset-0 z-50 flex items-center justify-center bg-gray-100">
+    <div class="bg-white rounded-xl shadow-md p-8 w-full max-w-sm">
+      <h2 class="text-xl font-bold text-gray-800 mb-1">Mediko Admin</h2>
+      <p class="text-sm text-gray-500 mb-5">Enter your admin password to continue.</p>
+      <input id="pw-input" type="password" placeholder="Password"
+        class="w-full border border-gray-300 rounded px-3 py-2 mb-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+      <p id="login-error" class="text-red-500 text-xs mb-2 hidden">Incorrect password.</p>
+      <button onclick="doLogin()"
+        class="w-full bg-blue-600 text-white py-2 rounded font-medium hover:bg-blue-700 text-sm">Login</button>
     </div>
   </div>
 
-  <!-- Filters -->
-  <div class="bg-white shadow rounded-lg p-4 mb-4 flex flex-wrap items-end gap-3">
-    <div class="flex-1 min-w-[200px]">
-      <label class="block text-xs font-medium text-gray-600 mb-1">Search</label>
-      <input id="search-input" type="text" placeholder="Name, email, or ID number"
-        class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+  <!-- Main dashboard -->
+  <div id="main-content" class="max-w-6xl mx-auto hidden">
+    <div class="flex justify-between items-center mb-4">
+      <h1 class="text-2xl font-bold text-gray-800">Mediko Admin</h1>
+      <div class="flex gap-2">
+        <button onclick="refreshActiveTab()"
+          class="bg-blue-600 text-white px-4 py-2 rounded shadow hover:bg-blue-700 text-sm">Refresh</button>
+        <button onclick="doLogout()"
+          class="bg-gray-200 text-gray-700 px-4 py-2 rounded shadow hover:bg-gray-300 text-sm">Logout</button>
+      </div>
     </div>
-    <div>
-      <label class="block text-xs font-medium text-gray-600 mb-1">From</label>
-      <input id="date-from" type="date"
-        class="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+
+    <!-- Tabs -->
+    <div class="border-b border-gray-200 mb-4">
+      <nav class="flex gap-1" id="tab-nav">
+        <button data-tab="applications" onclick="setTab('applications')"
+          class="tab-btn active-tab px-4 py-2 text-sm font-medium">Applications</button>
+        <button data-tab="contact" onclick="setTab('contact')" class="tab-btn px-4 py-2 text-sm font-medium">Contact
+          Messages</button>
+        <button data-tab="returns" onclick="setTab('returns')" class="tab-btn px-4 py-2 text-sm font-medium">Return
+          Requests</button>
+      </nav>
     </div>
-    <div>
-      <label class="block text-xs font-medium text-gray-600 mb-1">To</label>
-      <input id="date-to" type="date"
-        class="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
-    </div>
-    <div class="flex gap-2">
-      <button onclick="applyFilters()"
-        class="bg-blue-600 text-white px-4 py-2 rounded shadow hover:bg-blue-700 text-sm">Apply</button>
-      <button onclick="clearFilters()"
-        class="bg-gray-200 text-gray-700 px-4 py-2 rounded shadow hover:bg-gray-300 text-sm">Clear</button>
+
+    <!-- ───── Applications panel ───── -->
+    <section data-panel="applications" class="tab-panel">
+      <div class="bg-white shadow rounded-lg p-4 mb-4 flex flex-wrap items-end gap-3">
+        <div class="flex-1 min-w-[200px]">
+          <label class="block text-xs font-medium text-gray-600 mb-1">Search</label>
+          <input id="search-applications" type="text" placeholder="Name, email, or ID number"
+            class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">From</label>
+          <input id="from-applications" type="date"
+            class="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">To</label>
+          <input id="to-applications" type="date"
+            class="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+        </div>
+        <div class="flex gap-2">
+          <button onclick="applyFilters('applications')"
+            class="bg-blue-600 text-white px-4 py-2 rounded shadow hover:bg-blue-700 text-sm">Apply</button>
+          <button onclick="clearFilters('applications')"
+            class="bg-gray-200 text-gray-700 px-4 py-2 rounded shadow hover:bg-gray-300 text-sm">Clear</button>
+        </div>
+      </div>
+      <div id="page-applications" class="text-sm text-gray-500 mb-3 hidden"></div>
+      <div class="bg-white shadow rounded-lg overflow-hidden">
+        <table class="min-w-full divide-y divide-gray-200">
+          <thead class="bg-gray-100">
+            <tr>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Applicant</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Contact</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">ID Number</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Photos</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date Submitted</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="body-applications" class="divide-y divide-gray-200"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ───── Contact panel ───── -->
+    <section data-panel="contact" class="tab-panel hidden">
+      <div class="bg-white shadow rounded-lg p-4 mb-4 flex flex-wrap items-end gap-3">
+        <div class="flex-1 min-w-[200px]">
+          <label class="block text-xs font-medium text-gray-600 mb-1">Search</label>
+          <input id="search-contact" type="text" placeholder="Name, email, or message text"
+            class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">From</label>
+          <input id="from-contact" type="date"
+            class="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">To</label>
+          <input id="to-contact" type="date"
+            class="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+        </div>
+        <div class="flex gap-2">
+          <button onclick="applyFilters('contact')"
+            class="bg-blue-600 text-white px-4 py-2 rounded shadow hover:bg-blue-700 text-sm">Apply</button>
+          <button onclick="clearFilters('contact')"
+            class="bg-gray-200 text-gray-700 px-4 py-2 rounded shadow hover:bg-gray-300 text-sm">Clear</button>
+        </div>
+      </div>
+      <div id="page-contact" class="text-sm text-gray-500 mb-3 hidden"></div>
+      <div class="bg-white shadow rounded-lg overflow-hidden">
+        <table class="min-w-full divide-y divide-gray-200">
+          <thead class="bg-gray-100">
+            <tr>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">From</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Contact</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Message</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="body-contact" class="divide-y divide-gray-200"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ───── Returns panel ───── -->
+    <section data-panel="returns" class="tab-panel hidden">
+      <div class="bg-white shadow rounded-lg p-4 mb-4 flex flex-wrap items-end gap-3">
+        <div class="flex-1 min-w-[200px]">
+          <label class="block text-xs font-medium text-gray-600 mb-1">Search</label>
+          <input id="search-returns" type="text" placeholder="Name, email, order, or items"
+            class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">From</label>
+          <input id="from-returns" type="date"
+            class="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">To</label>
+          <input id="to-returns" type="date"
+            class="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+        </div>
+        <div class="flex gap-2">
+          <button onclick="applyFilters('returns')"
+            class="bg-blue-600 text-white px-4 py-2 rounded shadow hover:bg-blue-700 text-sm">Apply</button>
+          <button onclick="clearFilters('returns')"
+            class="bg-gray-200 text-gray-700 px-4 py-2 rounded shadow hover:bg-gray-300 text-sm">Clear</button>
+        </div>
+      </div>
+      <div id="page-returns" class="text-sm text-gray-500 mb-3 hidden"></div>
+      <div class="bg-white shadow rounded-lg overflow-hidden">
+        <table class="min-w-full divide-y divide-gray-200">
+          <thead class="bg-gray-100">
+            <tr>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Customer</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Order</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Items / Reason</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Photos</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="body-returns" class="divide-y divide-gray-200"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <!-- Image preview modal -->
+  <div id="image-modal"
+    class="fixed inset-0 z-50 hidden bg-black bg-opacity-95 flex flex-col items-center justify-center p-6">
+    <button onclick="closeModal()"
+      class="absolute top-5 right-8 text-white text-5xl hover:text-gray-300 transition">&times;</button>
+    <div id="modal-container" class="flex flex-wrap justify-center gap-4 w-full max-w-7xl"></div>
+    <div id="modal-caption" class="text-white mt-6 font-medium text-xl bg-gray-800 px-4 py-2 rounded"></div>
+  </div>
+
+  <!-- Reject reason modal -->
+  <div id="reject-modal" class="fixed inset-0 z-50 hidden bg-black bg-opacity-60 flex items-center justify-center p-6">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+      <h3 class="text-lg font-semibold text-gray-900 mb-1">Reject submission</h3>
+      <p id="reject-modal-subtitle" class="text-sm text-gray-500 mb-4">
+        Please provide a reason. This will be emailed to the customer and saved to the record.
+      </p>
+      <textarea id="reject-reason-input" rows="5" placeholder="Explain why this is being rejected..."
+        class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-400 resize-y"></textarea>
+      <p id="reject-error" class="text-red-500 text-xs mt-2 hidden">Reason must be at least 5 characters.</p>
+      <div class="flex justify-end gap-2 mt-4">
+        <button onclick="closeRejectModal()"
+          class="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300 text-sm">Cancel</button>
+        <button id="reject-confirm-btn" onclick="confirmReject()"
+          class="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 text-sm">Confirm Reject</button>
+      </div>
     </div>
   </div>
 
-  <!-- Pagination info -->
-  <div id="pagination-info" class="text-sm text-gray-500 mb-3 hidden">
-    Page <span id="current-page">1</span> of <span id="total-pages">1</span>
-    &nbsp;·&nbsp; <span id="total-items">0</span> total applications
-    <button id="prev-btn" onclick="changePage(-1)"
-      class="ml-4 px-2 py-1 border rounded text-xs hover:bg-gray-100 disabled:opacity-40">← Prev</button>
-    <button id="next-btn" onclick="changePage(1)"
-      class="ml-2 px-2 py-1 border rounded text-xs hover:bg-gray-100 disabled:opacity-40">Next →</button>
-  </div>
+  <script src="https://unpkg.com/@shopify/app-bridge@3"></script>
+  <script src="https://unpkg.com/@shopify/app-bridge-utils@3"></script>
+  <script>
+    const GATEWAY_URL = 'https://mediko-gateway.quailshack.com';
+    const TOKEN_KEY = 'mediko_dashboard_token';
 
-  <div class="bg-white shadow rounded-lg overflow-hidden">
-    <table class="min-w-full divide-y divide-gray-200">
-      <thead class="bg-gray-100">
-        <tr>
-          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Applicant</th>
-          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Contact</th>
-          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">ID Number</th>
-          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Photos</th>
-          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date Submitted</th>
-          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
-        </tr>
-      </thead>
-      <tbody id="table-body" class="divide-y divide-gray-200"></tbody>
-    </table>
-  </div>
-</div>
+    let dashboardToken = sessionStorage.getItem(TOKEN_KEY) || null;
+    let activeTab = 'applications';
 
-<!-- Image preview modal -->
-<div id="image-modal"
-  class="fixed inset-0 z-50 hidden bg-black bg-opacity-95 flex flex-col items-center justify-center p-6">
-  <button onclick="closeModal()"
-    class="absolute top-5 right-8 text-white text-5xl hover:text-gray-300 transition">&times;</button>
-  <div id="modal-container" class="flex flex-wrap justify-center gap-4 w-full max-w-7xl"></div>
-  <div id="modal-caption" class="text-white mt-6 font-medium text-xl bg-gray-800 px-4 py-2 rounded"></div>
-</div>
+    const TABS = {
+      applications: {
+        listUrl: '/api/submissions',
+        statusUrl: id => `/api/submissions/${id}/status`,
+        colCount: 7,
+        page: 1, totalPages: 1,
+        filters: {search: '', date_from: '', date_to: ''},
+        renderRow: renderApplicationRow,
+      },
+      contact: {
+        listUrl: '/api/contact-submissions',
+        statusUrl: id => `/api/contact-submissions/${id}/status`,
+        colCount: 6,
+        page: 1, totalPages: 1,
+        filters: {search: '', date_from: '', date_to: ''},
+        renderRow: renderContactRow,
+      },
+      returns: {
+        listUrl: '/api/return-requests',
+        statusUrl: id => `/api/return-requests/${id}/status`,
+        colCount: 7,
+        page: 1, totalPages: 1,
+        filters: {search: '', date_from: '', date_to: ''},
+        renderRow: renderReturnRow,
+      },
+    };
 
-<script src="https://unpkg.com/@shopify/app-bridge@3"></script>
-<script src="https://unpkg.com/@shopify/app-bridge-utils@3"></script>
-<script>
-  const GATEWAY_URL = 'https://mediko-gateway.quailshack.com';
-  const TOKEN_KEY = 'mediko_dashboard_token';
+    // ── Auth ──────────────────────────────────────────────────────────────────
 
-  let dashboardToken = sessionStorage.getItem(TOKEN_KEY) || null;
-  let currentPage = 1;
-  let totalPages = 1;
-  let currentFilters = { search: '', date_from: '', date_to: '' };
+    async function doLogin() {
+      const pw = document.getElementById('pw-input').value.trim();
+      const errEl = document.getElementById('login-error');
+      errEl.classList.add('hidden');
+      if (!pw) return;
 
-  // ── Auth ──────────────────────────────────────────────────────────────────
-
-  async function doLogin() {
-    const pw = document.getElementById('pw-input').value.trim();
-    const errEl = document.getElementById('login-error');
-    errEl.classList.add('hidden');
-
-    if (!pw) return;
-
-    try {
-      const res = await fetch(`${GATEWAY_URL}/api/auth/admin`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: pw })
-      });
-
-      if (!res.ok) {
+      try {
+        const res = await fetch(`${GATEWAY_URL}/api/auth/admin`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({password: pw})
+        });
+        if (!res.ok) {errEl.classList.remove('hidden'); return;}
+        const data = await res.json();
+        dashboardToken = data.token;
+        sessionStorage.setItem(TOKEN_KEY, dashboardToken);
+        showDashboard();
+      } catch (e) {
+        errEl.textContent = 'Network error. Check console.';
         errEl.classList.remove('hidden');
-        return;
+        console.error('Login error:', e);
       }
-
-      const data = await res.json();
-      dashboardToken = data.token;
-      sessionStorage.setItem(TOKEN_KEY, dashboardToken);
-      showDashboard();
-      loadSubmissions();
-    } catch (e) {
-      errEl.textContent = 'Network error. Check console.';
-      errEl.classList.remove('hidden');
-      console.error('Login error:', e);
     }
-  }
 
-  // Allow Enter key on password field
-  document.addEventListener('DOMContentLoaded', () => {
-    document.getElementById('pw-input')?.addEventListener('keydown', e => {
-      if (e.key === 'Enter') doLogin();
-    });
-  });
+    function doLogout() {
+      sessionStorage.removeItem(TOKEN_KEY);
+      dashboardToken = null;
+      document.getElementById('main-content').classList.add('hidden');
+      document.getElementById('login-screen').classList.remove('hidden');
+    }
 
-  function doLogout() {
-    sessionStorage.removeItem(TOKEN_KEY);
-    dashboardToken = null;
-    document.getElementById('main-content').classList.add('hidden');
-    document.getElementById('login-screen').classList.remove('hidden');
-  }
+    async function tryShopifyAuth() {
+      try {
+        const urlParams = new URLSearchParams(window.location.search);
+        const host = urlParams.get('host');
+        const apiKey = urlParams.get('apiKey') || 'dummy-key';
+        const shopOrigin = urlParams.get('shop');
+        if (!host || !shopOrigin) return false;
 
-  async function tryShopifyAuth() {
-    try {
-      const urlParams = new URLSearchParams(window.location.search);
-      const host = urlParams.get('host');
-      const apiKey = urlParams.get('apiKey') || 'dummy-key';
-      const shopOrigin = urlParams.get('shop');
+        const app = window['app-bridge'].createApp({apiKey, host});
+        const sessionToken = await window['app-bridge-utils'].getSessionToken(app);
 
-      if (!host || !shopOrigin) return false;
+        const res = await fetch(`${GATEWAY_URL}/api/auth/shopify`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({shopOrigin, sessionToken})
+        });
+        if (!res.ok) return false;
+        const data = await res.json();
+        dashboardToken = data.token;
+        sessionStorage.setItem(TOKEN_KEY, dashboardToken);
+        return true;
+      } catch (e) {
+        console.warn('Shopify auth failed, falling back to password login:', e.message);
+        return false;
+      }
+    }
 
-      const app = window['app-bridge'].createApp({ apiKey, host });
-      const sessionToken = await window['app-bridge-utils'].getSessionToken(app);
+    function showDashboard() {
+      document.getElementById('login-screen').classList.add('hidden');
+      document.getElementById('main-content').classList.remove('hidden');
+      setTab(activeTab);
+    }
 
-      const res = await fetch(`${GATEWAY_URL}/api/auth/shopify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ shopOrigin, sessionToken })
+    // ── Init ──────────────────────────────────────────────────────────────────
+
+    (async function init() {
+      if (dashboardToken) {showDashboard(); return;}
+      const inShopify = await tryShopifyAuth();
+      if (inShopify) showDashboard();
+    })();
+
+    document.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('pw-input')?.addEventListener('keydown', e => {
+        if (e.key === 'Enter') doLogin();
       });
+      ['applications', 'contact', 'returns'].forEach(name => {
+        document.getElementById(`search-${name}`)?.addEventListener('keydown', e => {
+          if (e.key === 'Enter') applyFilters(name);
+        });
+        document.getElementById(`from-${name}`)?.addEventListener('change', () => applyFilters(name));
+        document.getElementById(`to-${name}`)?.addEventListener('change', () => applyFilters(name));
+      });
+    });
 
-      if (!res.ok) return false;
+    // ── Tabs ──────────────────────────────────────────────────────────────────
 
-      const data = await res.json();
-      dashboardToken = data.token;
-      sessionStorage.setItem(TOKEN_KEY, dashboardToken);
-      return true;
-    } catch (e) {
-      console.warn('Shopify auth failed, falling back to password login:', e.message);
-      return false;
-    }
-  }
-
-  function showDashboard() {
-    document.getElementById('login-screen').classList.add('hidden');
-    document.getElementById('main-content').classList.remove('hidden');
-  }
-
-  // ── Init ──────────────────────────────────────────────────────────────────
-
-  (async function init() {
-    // If we already have a stored token, go straight to dashboard
-    if (dashboardToken) {
-      showDashboard();
-      loadSubmissions();
-      return;
+    function setTab(name) {
+      activeTab = name;
+      document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.toggle('active-tab', btn.dataset.tab === name);
+      });
+      document.querySelectorAll('[data-panel]').forEach(panel => {
+        panel.classList.toggle('hidden', panel.dataset.panel !== name);
+      });
+      loadTab(name);
     }
 
-    // Try Shopify App Bridge if we're inside an iframe with the right params
-    const inShopify = await tryShopifyAuth();
-    if (inShopify) {
-      showDashboard();
-      loadSubmissions();
-    }
-    // Otherwise, login screen is already visible — wait for user
-  })();
+    function refreshActiveTab() {loadTab(activeTab);}
 
-  // ── Load submissions ──────────────────────────────────────────────────────
+    // ── Generic loader ────────────────────────────────────────────────────────
 
-  async function loadSubmissions(page = currentPage) {
-    const tbody = document.getElementById('table-body');
-    tbody.innerHTML = '<tr><td colspan="7" class="p-4 text-center text-gray-500">Loading…</td></tr>';
+    async function loadTab(name, page) {
+      const tab = TABS[name];
+      if (page) tab.page = page;
+      const tbody = document.getElementById(`body-${name}`);
+      tbody.innerHTML = `<tr><td colspan="${tab.colCount}" class="p-4 text-center text-gray-500">Loading…</td></tr>`;
 
-    try {
-      const params = new URLSearchParams({ limit: 20, page });
-      if (currentFilters.search) params.set('search', currentFilters.search);
-      if (currentFilters.date_from) params.set('date_from', currentFilters.date_from);
-      if (currentFilters.date_to) params.set('date_to', currentFilters.date_to);
+      try {
+        const params = new URLSearchParams({limit: 20, page: tab.page});
+        if (tab.filters.search) params.set('search', tab.filters.search);
+        if (tab.filters.date_from) params.set('date_from', tab.filters.date_from);
+        if (tab.filters.date_to) params.set('date_to', tab.filters.date_to);
 
-      const res = await fetch(`${GATEWAY_URL}/api/submissions?${params.toString()}`, {
-        headers: {
-          'Authorization': `Bearer ${dashboardToken}`,
-          'Content-Type': 'application/json'
+        const res = await fetch(`${GATEWAY_URL}${tab.listUrl}?${params}`, {
+          headers: {
+            'Authorization': `Bearer ${dashboardToken}`,
+            'Content-Type': 'application/json'
+          }
+        });
+
+        if (res.status === 401) {doLogout(); return;}
+
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error || `Server error ${res.status}`);
+
+        tab.page = json.metadata.current_page;
+        tab.totalPages = json.metadata.total_pages;
+        updatePagination(name, json.metadata);
+
+        if (!json.data.length) {
+          tbody.innerHTML = `<tr><td colspan="${tab.colCount}" class="p-4 text-center text-gray-500">No records match the current filters.</td></tr>`;
+          return;
         }
-      });
-
-      // If token expired, force re-login
-      if (res.status === 401) {
-        sessionStorage.removeItem(TOKEN_KEY);
-        dashboardToken = null;
-        doLogout();
-        return;
+        tbody.innerHTML = json.data.map(tab.renderRow).join('');
+      } catch (e) {
+        console.error(`loadTab(${name}) error:`, e);
+        tbody.innerHTML = `<tr><td colspan="${tab.colCount}" class="p-4 text-center text-red-500">Error: ${e.message}</td></tr>`;
       }
-
-      const json = await res.json();  // read body ONCE
-
-      if (!res.ok) {
-        throw new Error(json.error || `Server error ${res.status}`);
-      }
-
-      // Update pagination state
-      currentPage = json.metadata.current_page;
-      totalPages = json.metadata.total_pages;
-      updatePagination(json.metadata);
-
-      if (!json.data.length) {
-        tbody.innerHTML = '<tr><td colspan="7" class="p-4 text-center text-gray-500">No applications match the current filters.</td></tr>';
-        return;
-      }
-
-      tbody.innerHTML = json.data.map(app => {
-        const photoArray = app.id_photo_path ? app.id_photo_path.split(',') : [];
-        const photoButtons = photoArray.map((p, i) => {
-          const fileName = p.split('/').pop();
-          const fullUrl = `${GATEWAY_URL}/view-uploads/${fileName}`;
-          return `<button onclick="openPreview('${fullUrl}', '${escHtml(app.full_name)}')"
-            class="bg-gray-100 hover:bg-blue-100 border border-gray-300 rounded px-2 py-1 text-xs flex items-center gap-1">
-            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
-              <path d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
-            </svg>
-            View ${i + 1}
-          </button>`;
-        }).join('');
-
-        const submittedAt = app.created_at
-          ? new Date(app.created_at).toLocaleString('en-PH', {
-              year: 'numeric', month: 'short', day: 'numeric',
-              hour: '2-digit', minute: '2-digit'
-            })
-          : '—';
-
-        const status = app.status || 'pending';
-
-        return `<tr>
-          <td class="px-6 py-4">
-            <div class="text-sm font-medium text-gray-900">${escHtml(app.full_name)}</div>
-            <div class="text-xs text-gray-500">${escHtml(app.email_address)}</div>
-          </td>
-          <td class="px-6 py-4 text-sm text-gray-500 whitespace-nowrap">${escHtml(app.contact_number)}</td>
-          <td class="px-6 py-4 text-sm text-gray-500">${escHtml(app.id_number)}</td>
-          <td class="px-6 py-4 text-sm">
-            <div class="flex gap-2 flex-wrap">${photoButtons}</div>
-          </td>
-          <td class="px-6 py-4 text-sm text-gray-500 whitespace-nowrap">${submittedAt}</td>
-          <td class="px-6 py-4 text-sm">
-            ${statusBadge(status)}
-            ${app.discount_code ? `<div class="mt-1 text-xs font-mono text-gray-700">${escHtml(app.discount_code)}</div>` : ''}
-          </td>
-          <td class="px-6 py-4 text-sm">
-            <div class="flex gap-1 flex-wrap">${statusActions(app.id, status)}</div>
-          </td>
-        </tr>`;
-      }).join('');
-
-    } catch (e) {
-      console.error('loadSubmissions error:', e);
-      tbody.innerHTML = `<tr><td colspan="7" class="p-4 text-center text-red-500">Error: ${e.message}</td></tr>`;
     }
-  }
 
-  function updatePagination(meta) {
-    const el = document.getElementById('pagination-info');
-    el.classList.remove('hidden');
-    document.getElementById('current-page').textContent = meta.current_page;
-    document.getElementById('total-pages').textContent = meta.total_pages;
-    document.getElementById('total-items').textContent = meta.total_items;
-    document.getElementById('prev-btn').disabled = meta.current_page <= 1;
-    document.getElementById('next-btn').disabled = meta.current_page >= meta.total_pages;
-  }
+    function updatePagination(name, meta) {
+      const el = document.getElementById(`page-${name}`);
+      el.classList.remove('hidden');
+      el.innerHTML = `Page ${meta.current_page} of ${meta.total_pages} &nbsp;·&nbsp; ${meta.total_items} total
+      <button class="ml-4 px-2 py-1 border rounded text-xs hover:bg-gray-100 disabled:opacity-40"
+              onclick="changePage('${name}', -1)" ${meta.current_page <= 1 ? 'disabled' : ''}>← Prev</button>
+      <button class="ml-2 px-2 py-1 border rounded text-xs hover:bg-gray-100 disabled:opacity-40"
+              onclick="changePage('${name}', 1)" ${meta.current_page >= meta.total_pages ? 'disabled' : ''}>Next →</button>`;
+    }
 
-  function changePage(delta) {
-    const next = currentPage + delta;
-    if (next < 1 || next > totalPages) return;
-    loadSubmissions(next);
-  }
+    function changePage(name, delta) {
+      const tab = TABS[name];
+      const next = tab.page + delta;
+      if (next < 1 || next > tab.totalPages) return;
+      loadTab(name, next);
+    }
 
-  // ── Filters ───────────────────────────────────────────────────────────────
+    // ── Filters ───────────────────────────────────────────────────────────────
 
-  function applyFilters() {
-    currentFilters = {
-      search: document.getElementById('search-input').value.trim(),
-      date_from: document.getElementById('date-from').value,
-      date_to: document.getElementById('date-to').value,
-    };
-    currentPage = 1;
-    loadSubmissions(1);
-  }
+    function applyFilters(name) {
+      const tab = TABS[name];
+      tab.filters = {
+        search: document.getElementById(`search-${name}`).value.trim(),
+        date_from: document.getElementById(`from-${name}`).value,
+        date_to: document.getElementById(`to-${name}`).value,
+      };
+      tab.page = 1;
+      loadTab(name);
+    }
 
-  function clearFilters() {
-    document.getElementById('search-input').value = '';
-    document.getElementById('date-from').value = '';
-    document.getElementById('date-to').value = '';
-    currentFilters = { search: '', date_from: '', date_to: '' };
-    currentPage = 1;
-    loadSubmissions(1);
-  }
+    function clearFilters(name) {
+      document.getElementById(`search-${name}`).value = '';
+      document.getElementById(`from-${name}`).value = '';
+      document.getElementById(`to-${name}`).value = '';
+      TABS[name].filters = {search: '', date_from: '', date_to: ''};
+      TABS[name].page = 1;
+      loadTab(name);
+    }
 
-  document.addEventListener('DOMContentLoaded', () => {
-    document.getElementById('search-input')?.addEventListener('keydown', e => {
-      if (e.key === 'Enter') applyFilters();
-    });
-    document.getElementById('date-from')?.addEventListener('change', applyFilters);
-    document.getElementById('date-to')?.addEventListener('change', applyFilters);
-  });
+    // ── Status ────────────────────────────────────────────────────────────────
 
+    function statusBadge(status) {
+      const styles = {
+        pending: 'bg-yellow-100 text-yellow-800',
+        approved: 'bg-green-100 text-green-800',
+        rejected: 'bg-red-100 text-red-800',
+        resolved: 'bg-blue-100 text-blue-800',
+      };
+      const cls = styles[status] || styles.pending;
+      return `<span class="inline-block px-2 py-1 rounded text-xs font-medium ${cls}">${escHtml(status)}</span>`;
+    }
 
-
-  // ── Status ────────────────────────────────────────────────────────────────
-
-  function statusBadge(status) {
-    const styles = {
-      pending:  'bg-yellow-100 text-yellow-800',
-      approved: 'bg-green-100 text-green-800',
-      rejected: 'bg-red-100 text-red-800',
-    };
-    const cls = styles[status] || styles.pending;
-    return `<span class="inline-block px-2 py-1 rounded text-xs font-medium ${cls}">${escHtml(status)}</span>`;
-  }
-
-  function statusActions(id, status) {
-    if (status === 'pending') {
-      return `
-        <button onclick="setStatus(${id}, 'approved')" class="px-2 py-1 bg-green-600 text-white rounded text-xs hover:bg-green-700">Approve</button>
-        <button onclick="setStatus(${id}, 'rejected')" class="px-2 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-700">Reject</button>
+    function applicationActions(id, status) {
+      if (status === 'pending') {
+        return `
+        <button onclick="setStatus('applications', ${id}, 'approved')" class="px-2 py-1 bg-green-600 text-white rounded text-xs hover:bg-green-700">Approve</button>
+        <button onclick="promptReject('applications', ${id})" class="px-2 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-700">Reject</button>
       `;
-    }
-    return `<button onclick="setStatus(${id}, 'pending')" class="px-2 py-1 bg-gray-200 text-gray-700 rounded text-xs hover:bg-gray-300">Revert</button>`;
-  }
-
-  async function setStatus(id, status) {
-    try {
-      const res = await fetch(`${GATEWAY_URL}/api/submissions/${id}/status`, {
-        method: 'PATCH',
-        headers: {
-          'Authorization': `Bearer ${dashboardToken}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ status })
-      });
-
-      if (res.status === 401) {
-        sessionStorage.removeItem(TOKEN_KEY);
-        dashboardToken = null;
-        doLogout();
-        return;
       }
-
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || `Server error ${res.status}`);
-
-      loadSubmissions(currentPage);
-    } catch (e) {
-      console.error('setStatus error:', e);
-      alert(`Failed to update status: ${e.message}`);
+      return `<button onclick="setStatus('applications', ${id}, 'pending')" class="px-2 py-1 bg-gray-200 text-gray-700 rounded text-xs hover:bg-gray-300">Revert</button>`;
     }
-  }
 
-  // ── Modal ─────────────────────────────────────────────────────────────────
+    function contactActions(id, status) {
+      if (status === 'pending') {
+        return `<button onclick="setStatus('contact', ${id}, 'resolved')" class="px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700">Mark Resolved</button>`;
+      }
+      return `<button onclick="setStatus('contact', ${id}, 'pending')" class="px-2 py-1 bg-gray-200 text-gray-700 rounded text-xs hover:bg-gray-300">Reopen</button>`;
+    }
 
-  function openPreview(photoUrl, name) {
-    const modal = document.getElementById('image-modal');
-    const container = document.getElementById('modal-container');
-    const caption = document.getElementById('modal-caption');
+    function returnActions(id, status) {
+      if (status === 'pending') {
+        return `
+        <button onclick="setStatus('returns', ${id}, 'approved')" class="px-2 py-1 bg-green-600 text-white rounded text-xs hover:bg-green-700">Approve</button>
+        <button onclick="promptReject('returns', ${id})" class="px-2 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-700">Reject</button>
+      `;
+      }
+      return `<button onclick="setStatus('returns', ${id}, 'pending')" class="px-2 py-1 bg-gray-200 text-gray-700 rounded text-xs hover:bg-gray-300">Revert</button>`;
+    }
 
-    container.innerHTML = '';
-    const img = document.createElement('img');
-    img.src = photoUrl;
-    img.className = 'max-h-[70vh] w-auto rounded shadow-xl border-2 border-white object-contain bg-gray-900';
-    container.appendChild(img);
+    async function setStatus(name, id, status) {
+      const tab = TABS[name];
+      try {
+        const res = await fetch(`${GATEWAY_URL}${tab.statusUrl(id)}`, {
+          method: 'PATCH',
+          headers: {
+            'Authorization': `Bearer ${dashboardToken}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({status})
+        });
+        if (res.status === 401) {doLogout(); return;}
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error || `Server error ${res.status}`);
+        loadTab(name);
+      } catch (e) {
+        console.error('setStatus error:', e);
+        alert(`Failed to update status: ${e.message}`);
+      }
+    }
 
-    caption.innerText = `Reviewing ID for: ${name}`;
-    modal.classList.remove('hidden');
-  }
+    // ── Row renderers ─────────────────────────────────────────────────────────
 
-  function closeModal() {
-    document.getElementById('image-modal').classList.add('hidden');
-  }
+    function formatDate(ts) {
+      return ts
+        ? new Date(ts).toLocaleString('en-PH', {
+          year: 'numeric', month: 'short', day: 'numeric',
+          hour: '2-digit', minute: '2-digit'
+        })
+        : '—';
+    }
 
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+    function photoButtons(pathsCsv, ownerName) {
+      const arr = pathsCsv ? pathsCsv.split(',') : [];
+      return arr.map((p, i) => {
+        const fileName = p.split(/[\\/]/).pop();
+        const fullUrl = `${GATEWAY_URL}/view-uploads/${fileName}`;
+        const safeName = escHtml(ownerName).replace(/'/g, "&#39;");
+        return `<button onclick="openPreview('${fullUrl}', '${safeName}')"
+        class="bg-gray-100 hover:bg-blue-100 border border-gray-300 rounded px-2 py-1 text-xs flex items-center gap-1">
+        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+          <path d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+        </svg>
+        View ${i + 1}
+      </button>`;
+      }).join('');
+    }
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
+    function renderApplicationRow(app) {
+      const status = app.status || 'pending';
+      return `<tr>
+      <td class="px-6 py-4">
+        <div class="text-sm font-medium text-gray-900">${escHtml(app.full_name)}</div>
+        <div class="text-xs text-gray-500">${escHtml(app.email_address)}</div>
+      </td>
+      <td class="px-6 py-4 text-sm text-gray-500 whitespace-nowrap">${escHtml(app.contact_number)}</td>
+      <td class="px-6 py-4 text-sm text-gray-500">${escHtml(app.id_number)}</td>
+      <td class="px-6 py-4 text-sm">
+        <div class="flex gap-2 flex-wrap">${photoButtons(app.id_photo_path, app.full_name)}</div>
+      </td>
+      <td class="px-6 py-4 text-sm text-gray-500 whitespace-nowrap">${formatDate(app.created_at)}</td>
+      <td class="px-6 py-4 text-sm">
+        ${statusBadge(status)}
+        ${app.discount_code ? `<div class="mt-1 text-xs font-mono text-gray-700">${escHtml(app.discount_code)}</div>` : ''}
+      </td>
+      <td class="px-6 py-4 text-sm">
+        <div class="flex gap-1 flex-wrap">${applicationActions(app.id, status)}</div>
+      </td>
+    </tr>`;
+    }
 
-  function escHtml(str) {
-    return String(str ?? '')
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
-  }
-</script>
+    function renderContactRow(c) {
+      const status = c.status || 'pending';
+      return `<tr>
+      <td class="px-6 py-4">
+        <div class="text-sm font-medium text-gray-900">${escHtml(c.full_name)}</div>
+        <div class="text-xs text-gray-500">${escHtml(c.email_address)}</div>
+      </td>
+      <td class="px-6 py-4 text-sm text-gray-500 whitespace-nowrap">${escHtml(c.contact_number)}</td>
+      <td class="px-6 py-4 text-sm text-gray-700 max-w-md">
+        <div class="whitespace-pre-wrap break-words">${escHtml(c.message)}</div>
+      </td>
+      <td class="px-6 py-4 text-sm text-gray-500 whitespace-nowrap">${formatDate(c.created_at)}</td>
+      <td class="px-6 py-4 text-sm">${statusBadge(status)}</td>
+      <td class="px-6 py-4 text-sm">
+        <div class="flex gap-1 flex-wrap">${contactActions(c.id, status)}</div>
+      </td>
+    </tr>`;
+    }
+
+    function renderReturnRow(r) {
+      const status = r.status || 'pending';
+      return `<tr>
+      <td class="px-6 py-4">
+        <div class="text-sm font-medium text-gray-900">${escHtml(r.full_name)}</div>
+        <div class="text-xs text-gray-500">${escHtml(r.email_address)}</div>
+        <div class="text-xs text-gray-500">${escHtml(r.contact_number)}</div>
+      </td>
+      <td class="px-6 py-4 text-sm font-mono text-gray-700 whitespace-nowrap">${escHtml(r.order_number)}</td>
+      <td class="px-6 py-4 text-sm text-gray-700 max-w-sm">
+        <div class="text-xs font-semibold text-gray-500 uppercase">Items</div>
+        <div class="whitespace-pre-wrap break-words mb-2">${escHtml(r.items_to_return)}</div>
+        <div class="text-xs font-semibold text-gray-500 uppercase">Reason</div>
+        <div class="whitespace-pre-wrap break-words">${escHtml(r.reason)}</div>
+      </td>
+      <td class="px-6 py-4 text-sm">
+        <div class="flex gap-2 flex-wrap">${photoButtons(r.image_paths, r.full_name)}</div>
+      </td>
+      <td class="px-6 py-4 text-sm text-gray-500 whitespace-nowrap">${formatDate(r.created_at)}</td>
+      <td class="px-6 py-4 text-sm">${statusBadge(status)}</td>
+      <td class="px-6 py-4 text-sm">
+        <div class="flex gap-1 flex-wrap">${returnActions(r.id, status)}</div>
+      </td>
+    </tr>`;
+    }
+
+    // ── Modal ─────────────────────────────────────────────────────────────────
+
+    function openPreview(photoUrl, name) {
+      const modal = document.getElementById('image-modal');
+      const container = document.getElementById('modal-container');
+      const caption = document.getElementById('modal-caption');
+
+      container.innerHTML = '';
+      const img = document.createElement('img');
+      img.src = photoUrl;
+      img.className = 'max-h-[70vh] w-auto rounded shadow-xl border-2 border-white object-contain bg-gray-900';
+      container.appendChild(img);
+
+      caption.innerText = `Reviewing image for: ${name}`;
+      modal.classList.remove('hidden');
+    }
+
+    function closeModal() {
+      document.getElementById('image-modal').classList.add('hidden');
+    }
+
+    // ── Reject modal state ───────────────────────────
+    let _rejectTab = null;
+    let _rejectId = null;
+
+    // Called by Reject buttons — opens the modal
+    function promptReject(name, id) {
+      _rejectTab = name;
+      _rejectId = id;
+      document.getElementById('reject-reason-input').value = '';
+      document.getElementById('reject-error').classList.add('hidden');
+      // Update subtitle to show what's being rejected
+      const label = name === 'returns' ? 'return request' : 'application';
+      document.getElementById('reject-modal-subtitle').textContent =
+        `Rejecting ${label} #${id}. This reason will be emailed to the customer.`;
+      document.getElementById('reject-modal').classList.remove('hidden');
+      // Focus the textarea after a tick so it's visible
+      setTimeout(() => document.getElementById('reject-reason-input').focus(), 50);
+    }
+
+    // Called by Cancel button
+    function closeRejectModal() {
+      document.getElementById('reject-modal').classList.add('hidden');
+      _rejectTab = null;
+      _rejectId = null;
+    }
+
+    // Called by Confirm Reject button
+    async function confirmReject() {
+      const reason = document.getElementById('reject-reason-input').value.trim();
+      const errEl = document.getElementById('reject-error');
+      if (reason.length < 5) {errEl.classList.remove('hidden'); return;}
+      errEl.classList.add('hidden');
+
+      const btn = document.getElementById('reject-confirm-btn');
+      btn.disabled = true;
+      btn.textContent = 'Rejecting…';
+
+      const tab = TABS[_rejectTab];
+      try {
+        const res = await fetch(`${GATEWAY_URL}${tab.statusUrl(_rejectId)}`, {
+          method: 'PATCH',
+          headers: {
+            'Authorization': `Bearer ${dashboardToken}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({status: 'rejected', reason})
+        });
+        if (res.status === 401) {doLogout(); return;}
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error || `Server error ${res.status}`);
+        closeRejectModal();
+        loadTab(_rejectTab);
+      } catch (e) {
+        console.error('confirmReject error:', e);
+        alert(`Failed to reject: ${e.message}`);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Confirm Reject';
+      }
+    }
+
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape') {closeModal(); closeRejectModal();}
+    });
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    function escHtml(str) {
+      return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+  </script>
 </body>
+
 </html>

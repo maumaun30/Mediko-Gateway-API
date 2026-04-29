@@ -12,6 +12,16 @@ const jwt = require("jsonwebtoken");
 const app = express();
 app.set("trust proxy", 1);
 
+// TESTING_MODE bypasses rate limiter, time trap, and cooldown checks on form
+// endpoints so you can submit repeatedly during local/staging testing.
+// NEVER enable this in production.
+const TESTING_MODE = String(process.env.TESTING_MODE || "").toLowerCase() === "true";
+if (TESTING_MODE) {
+  console.warn(
+    "⚠️  TESTING_MODE is ON — rate limit, time trap, and cooldown are disabled.",
+  );
+}
+
 // ── Structured logger ─────────────────────────────────────────────────────────
 function log(level, event, data = {}) {
   console.log(
@@ -68,6 +78,7 @@ const submitLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => ipKeyGenerator(req),
+  skip: () => TESTING_MODE,
   handler(req, res, _next, options) {
     log("warn", "rate_limit_hit", { ip: req.ip });
     res.status(options.statusCode).json(options.message);
@@ -93,6 +104,24 @@ const upload = multer({
   },
 });
 
+const returnsStorage = multer.diskStorage({
+  destination: "./uploads/",
+  filename: (_req, file, cb) =>
+    cb(null, `RET-${Date.now()}-${crypto.randomBytes(3).toString("hex")}${path.extname(file.originalname)}`),
+});
+
+const returnsUpload = multer({
+  storage: returnsStorage,
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype.startsWith("image/")) {
+      cb(null, true);
+    } else {
+      cb(new Error("Only image files are allowed!"), false);
+    }
+  },
+});
+
 // ── Database ──────────────────────────────────────────────────────────────────
 const db = mysql.createPool({
   host: process.env.DB_HOST,
@@ -108,35 +137,111 @@ db.getConnection((err, conn) => {
     log("info", "db_connected");
     conn.release();
     ensureStatusColumn();
+    ensureContactTable();
+    ensureReturnsTable();
   }
 });
 
-function ensureColumn(name, definition) {
+function ensureColumnFor(table, name, definition) {
   db.query(
     `SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS
-     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'applications' AND COLUMN_NAME = ?`,
-    [process.env.DB_NAME, name],
+     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+    [process.env.DB_NAME, table, name],
     (err, rows) => {
       if (err) {
-        log("error", "migration_check_failed", { column: name, message: err.message });
+        log("error", "migration_check_failed", { table, column: name, message: err.message });
         return;
       }
       if (rows[0].c > 0) return;
-      db.query(`ALTER TABLE applications ADD COLUMN ${name} ${definition}`, (alterErr) => {
+      db.query(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`, (alterErr) => {
         if (alterErr) {
-          log("error", "migration_failed", { column: name, message: alterErr.message });
+          log("error", "migration_failed", { table, column: name, message: alterErr.message });
         } else {
-          log("info", "migration_applied", { column: name });
+          log("info", "migration_applied", { table, column: name });
         }
       });
     },
   );
 }
 
+function ensureColumn(name, definition) {
+  ensureColumnFor("applications", name, definition);
+}
+
 function ensureStatusColumn() {
   ensureColumn("status", "ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending'");
   ensureColumn("discount_code", "VARCHAR(64) NULL");
   ensureColumn("discount_price_rule_id", "BIGINT NULL");
+  ensureColumn("rejection_reason", "TEXT NULL");
+  ensureColumnFor("return_requests", "rejection_reason", "TEXT NULL");
+}
+
+function ensureContactTable() {
+  db.query(
+    `CREATE TABLE IF NOT EXISTS contact_submissions (
+       id INT AUTO_INCREMENT PRIMARY KEY,
+       full_name VARCHAR(255) NOT NULL,
+       email_address VARCHAR(255) NOT NULL,
+       contact_number VARCHAR(32) NOT NULL,
+       message TEXT NOT NULL,
+       status ENUM('pending','resolved') NOT NULL DEFAULT 'pending',
+       metadata TEXT,
+       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+       INDEX idx_contact_email (email_address),
+       INDEX idx_contact_created (created_at)
+     )`,
+    (err) => {
+      if (err) log("error", "migration_contact_table_failed", { message: err.message });
+      else log("info", "migration_contact_table_ready");
+    },
+  );
+}
+
+function ensureReturnsTable() {
+  db.query(
+    `CREATE TABLE IF NOT EXISTS return_requests (
+       id INT AUTO_INCREMENT PRIMARY KEY,
+       full_name VARCHAR(255) NOT NULL,
+       email_address VARCHAR(255) NOT NULL,
+       contact_number VARCHAR(32) NOT NULL,
+       order_number VARCHAR(64) NOT NULL,
+       items_to_return TEXT NOT NULL,
+       reason TEXT NOT NULL,
+       image_paths TEXT,
+       status ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending',
+       metadata TEXT,
+       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+       INDEX idx_returns_email (email_address),
+       INDEX idx_returns_order (order_number),
+       INDEX idx_returns_created (created_at)
+     )`,
+    (err) => {
+      if (err) log("error", "migration_returns_table_failed", { message: err.message });
+      else log("info", "migration_returns_table_ready");
+    },
+  );
+}
+
+// ── Helpers: queryAsync + requireAdmin ────────────────────────────────────────
+const queryAsync = (sql, params) =>
+  new Promise((resolve, reject) =>
+    db.query(sql, params, (err, rows) => (err ? reject(err) : resolve(rows))),
+  );
+
+function requireAdmin(req, res, next) {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Missing Bearer token" });
+    }
+    const token = authHeader.split(" ")[1];
+    const secret =
+      process.env.DASHBOARD_JWT_SECRET || "mediko-dashboard-secret-2026";
+    jwt.verify(token, secret);
+    next();
+  } catch {
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
 }
 
 // ── Mailer ────────────────────────────────────────────────────────────────────
@@ -339,6 +444,11 @@ async function createDiscountForApplicant(applicant) {
       customer_selection: "prerequisite",
       prerequisite_customer_ids: [customerId],
       starts_at: new Date().toISOString(),
+      combines_with: {
+        product_discounts: true,
+        order_discounts: true,
+        shipping_discounts: true,
+      },
     },
   });
 
@@ -397,6 +507,260 @@ async function sendApprovalEmail(applicant, code) {
   }
 }
 
+async function sendRejectionEmail(applicant, reason) {
+  const reasonHtml = reason
+    ? `<div style="background-color: #fef2f2; border: 1px solid #dc2626; padding: 15px; border-radius: 8px; margin: 20px 0;">
+         <strong style="color: #991b1b;">Reason:</strong>
+         <pre style="white-space: pre-wrap; font-family: inherit; margin: 8px 0 0 0; color: #7f1d1d;">${escapeHtml(reason)}</pre>
+       </div>`
+    : "";
+
+  const mail = {
+    from: `"Mediko.ph" <${process.env.MAIL_FROM}>`,
+    to: applicant.email_address,
+    subject: "Update on your Mediko.ph Senior/PWD discount application",
+    html: `
+      <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
+        <h2 style="color: #2c3e50;">Hello ${escapeHtml(applicant.full_name)},</h2>
+        <p>Thank you for applying for the Senior Citizen / PWD discount on Mediko.ph.</p>
+        <p>After reviewing your submission, we are unable to approve your application at this time.</p>
+        ${reasonHtml}
+        <p>If you believe this was a mistake or need help, please reply to this email or contact our support team and we'll be happy to assist.</p>
+        <p>Reference ID: #${applicant.id}</p>
+        <p>Stay healthy,<br><strong>Mediko.ph Team</strong></p>
+      </div>
+    `,
+  };
+
+  try {
+    await transporter.sendMail(mail);
+    log("info", "rejection_email_sent", { appId: applicant.id });
+  } catch (err) {
+    log("error", "rejection_email_failed", {
+      appId: applicant.id,
+      message: err.message,
+    });
+  }
+}
+
+// ── Contact / Returns email helpers ───────────────────────────────────────────
+function metaTable(meta) {
+  return `
+    <h4 style="margin-bottom: 5px; margin-top: 20px;">Technical Metadata:</h4>
+    <table border="1" style="border-collapse: collapse; width: 100%; max-width: 600px; font-family: sans-serif; font-size: 12px; color: #555;">
+      <tr><td style="padding: 6px; width: 150px;"><strong>IP Address</strong></td><td style="padding: 6px;">${meta.ip || "N/A"}</td></tr>
+      <tr><td style="padding: 6px;"><strong>Origin</strong></td><td style="padding: 6px;">${meta.origin || "N/A"}</td></tr>
+      <tr><td style="padding: 6px;"><strong>Browser Agent</strong></td><td style="padding: 6px;">${meta.user_agent || "N/A"}</td></tr>
+      <tr><td style="padding: 6px;"><strong>Referer</strong></td><td style="padding: 6px;">${meta.referer || "N/A"}</td></tr>
+    </table>
+  `;
+}
+
+function escapeHtml(str) {
+  return String(str ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+async function sendContactEmails(submission, metadataStr) {
+  const { id, full_name, email_address, contact_number, message } = submission;
+  let meta = {};
+  try {
+    meta = typeof metadataStr === "string" ? JSON.parse(metadataStr) : metadataStr || {};
+  } catch {
+    meta = {};
+  }
+
+  const userMail = {
+    from: `"Mediko.ph" <${process.env.MAIL_FROM}>`,
+    to: email_address,
+    subject: "We've received your message — Mediko.ph",
+    html: `
+      <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
+        <h2 style="color: #2c3e50;">Hello ${escapeHtml(full_name)},</h2>
+        <p>Thanks for reaching out. We've received your message and a Mediko representative will get back to you within <strong>1–2 business days</strong>.</p>
+        <div style="background-color: #f8f9fa; padding: 15px; border-left: 4px solid #005a9c; margin: 20px 0;">
+          <strong>Your message:</strong><br>
+          <pre style="white-space: pre-wrap; font-family: inherit; margin: 8px 0 0 0;">${escapeHtml(message)}</pre>
+        </div>
+        <p>Reference ID: #${id}</p>
+        <p>Stay healthy!<br><strong>Mediko.ph Team</strong></p>
+      </div>
+    `,
+  };
+
+  const adminMail = {
+    from: `"Mediko Gateway" <${process.env.MAIL_FROM}>`,
+    to: process.env.ADMIN_EMAIL,
+    cc:
+      process.env.ADMIN_CC && process.env.ADMIN_CC.trim() !== ""
+        ? process.env.ADMIN_CC.split(",")
+        : [],
+    subject: `[Mediko] New contact message #${id} — ${full_name}`,
+    html: `
+      <h3 style="color: #2c3e50;">New contact message</h3>
+      <table border="1" style="border-collapse: collapse; width: 100%; max-width: 600px; font-family: sans-serif;">
+        <tr style="background-color: #f8f9fa;"><td style="padding: 8px; width: 150px;"><strong>Message ID</strong></td><td style="padding: 8px;">#${id}</td></tr>
+        <tr><td style="padding: 8px;"><strong>Name</strong></td><td style="padding: 8px;">${escapeHtml(full_name)}</td></tr>
+        <tr><td style="padding: 8px;"><strong>Email</strong></td><td style="padding: 8px;">${escapeHtml(email_address)}</td></tr>
+        <tr><td style="padding: 8px;"><strong>Contact No.</strong></td><td style="padding: 8px;">${escapeHtml(contact_number)}</td></tr>
+        <tr><td style="padding: 8px; vertical-align: top;"><strong>Message</strong></td><td style="padding: 8px;"><pre style="white-space: pre-wrap; font-family: inherit; margin: 0;">${escapeHtml(message)}</pre></td></tr>
+      </table>
+      ${metaTable(meta)}
+    `,
+  };
+
+  try {
+    await Promise.all([
+      transporter.sendMail(userMail),
+      transporter.sendMail(adminMail),
+    ]);
+    log("info", "contact_emails_sent", { id });
+  } catch (err) {
+    log("error", "contact_email_failed", { id, message: err.message });
+  }
+}
+
+async function sendReturnEmails(returnReq, files, metadataStr) {
+  const {
+    id,
+    full_name,
+    email_address,
+    contact_number,
+    order_number,
+    items_to_return,
+    reason,
+  } = returnReq;
+
+  let meta = {};
+  try {
+    meta = typeof metadataStr === "string" ? JSON.parse(metadataStr) : metadataStr || {};
+  } catch {
+    meta = {};
+  }
+
+  const attachments = files
+    ? files.map((f) => ({ filename: f.originalname, path: f.path }))
+    : [];
+
+  const userMail = {
+    from: `"Mediko.ph" <${process.env.MAIL_FROM}>`,
+    to: email_address,
+    subject: `Return request received #${id} — Mediko.ph`,
+    html: `
+      <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
+        <h2 style="color: #2c3e50;">Hello ${escapeHtml(full_name)},</h2>
+        <p>We've received your return request for order <strong>${escapeHtml(order_number)}</strong>.</p>
+        <div style="background-color: #f8f9fa; padding: 15px; border-left: 4px solid #005a9c; margin: 20px 0;">
+          <strong>What happens next?</strong><br>
+          A Mediko representative will review your request and reach out with next steps.
+          <p>Standard processing time is <strong>3 to 5 business days</strong>.</p>
+        </div>
+        <p><strong>Request Details:</strong><br>
+        Reference ID: #${id}<br>
+        Order: ${escapeHtml(order_number)}<br>
+        Items: ${escapeHtml(items_to_return)}</p>
+        <p>Stay healthy!<br><strong>Mediko.ph Team</strong></p>
+      </div>
+    `,
+  };
+
+  const adminMail = {
+    from: `"Mediko Gateway" <${process.env.MAIL_FROM}>`,
+    to: process.env.ADMIN_EMAIL,
+    cc:
+      process.env.ADMIN_CC && process.env.ADMIN_CC.trim() !== ""
+        ? process.env.ADMIN_CC.split(",")
+        : [],
+    subject: `[Mediko] New return request #${id} — ${full_name}`,
+    attachments,
+    html: `
+      <h3 style="color: #2c3e50;">New return / refund request received</h3>
+      <table border="1" style="border-collapse: collapse; width: 100%; max-width: 600px; font-family: sans-serif;">
+        <tr style="background-color: #f8f9fa;"><td style="padding: 8px; width: 150px;"><strong>Request ID</strong></td><td style="padding: 8px;">#${id}</td></tr>
+        <tr><td style="padding: 8px;"><strong>Name</strong></td><td style="padding: 8px;">${escapeHtml(full_name)}</td></tr>
+        <tr><td style="padding: 8px;"><strong>Email</strong></td><td style="padding: 8px;">${escapeHtml(email_address)}</td></tr>
+        <tr><td style="padding: 8px;"><strong>Contact No.</strong></td><td style="padding: 8px;">${escapeHtml(contact_number)}</td></tr>
+        <tr><td style="padding: 8px;"><strong>Order Number</strong></td><td style="padding: 8px;">${escapeHtml(order_number)}</td></tr>
+        <tr><td style="padding: 8px; vertical-align: top;"><strong>Items</strong></td><td style="padding: 8px;"><pre style="white-space: pre-wrap; font-family: inherit; margin: 0;">${escapeHtml(items_to_return)}</pre></td></tr>
+        <tr><td style="padding: 8px; vertical-align: top;"><strong>Reason</strong></td><td style="padding: 8px;"><pre style="white-space: pre-wrap; font-family: inherit; margin: 0;">${escapeHtml(reason)}</pre></td></tr>
+        <tr><td style="padding: 8px;"><strong>Attachments</strong></td><td style="padding: 8px;">${attachments.length} image(s)</td></tr>
+      </table>
+      ${metaTable(meta)}
+    `,
+  };
+
+  try {
+    await Promise.all([
+      transporter.sendMail(userMail),
+      transporter.sendMail(adminMail),
+    ]);
+    log("info", "return_emails_sent", { id });
+  } catch (err) {
+    log("error", "return_email_failed", { id, message: err.message });
+  }
+}
+
+async function sendReturnApprovalEmail(returnReq) {
+  const mail = {
+    from: `"Mediko.ph" <${process.env.MAIL_FROM}>`,
+    to: returnReq.email_address,
+    subject: `Your return request #${returnReq.id} has been approved`,
+    html: `
+      <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
+        <h2 style="color: #2c3e50;">Hello ${escapeHtml(returnReq.full_name)},</h2>
+        <p>Good news — your return request for order <strong>${escapeHtml(returnReq.order_number)}</strong> has been <strong>approved</strong>.</p>
+        <div style="background-color: #f0fdf4; border: 1px solid #16a34a; padding: 20px; border-radius: 8px; margin: 20px 0;">
+          A Mediko representative will reach out shortly with shipping and refund instructions.
+        </div>
+        <p>Reference ID: #${returnReq.id}</p>
+        <p>Thank you,<br><strong>Mediko.ph Team</strong></p>
+      </div>
+    `,
+  };
+  try {
+    await transporter.sendMail(mail);
+    log("info", "return_approval_email_sent", { id: returnReq.id });
+  } catch (err) {
+    log("error", "return_approval_email_failed", { id: returnReq.id, message: err.message });
+  }
+}
+
+async function sendReturnRejectionEmail(returnReq, reason) {
+  const reasonHtml = reason
+    ? `<div style="background-color: #fef2f2; border: 1px solid #dc2626; padding: 15px; border-radius: 8px; margin: 20px 0;">
+         <strong style="color: #991b1b;">Reason:</strong>
+         <pre style="white-space: pre-wrap; font-family: inherit; margin: 8px 0 0 0; color: #7f1d1d;">${escapeHtml(reason)}</pre>
+       </div>`
+    : "";
+
+  const mail = {
+    from: `"Mediko.ph" <${process.env.MAIL_FROM}>`,
+    to: returnReq.email_address,
+    subject: `Update on your return request #${returnReq.id} — Mediko.ph`,
+    html: `
+      <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
+        <h2 style="color: #2c3e50;">Hello ${escapeHtml(returnReq.full_name)},</h2>
+        <p>Thank you for submitting a return request for order <strong>${escapeHtml(returnReq.order_number)}</strong>.</p>
+        <p>After reviewing your request, we are unable to approve this return at this time.</p>
+        ${reasonHtml}
+        <p>If you have questions or believe this was made in error, please reply to this email or contact our support team.</p>
+        <p>Reference ID: #${returnReq.id}</p>
+        <p>Thank you,<br><strong>Mediko.ph Team</strong></p>
+      </div>
+    `,
+  };
+
+  try {
+    await transporter.sendMail(mail);
+    log("info", "return_rejection_email_sent", { id: returnReq.id });
+  } catch (err) {
+    log("error", "return_rejection_email_failed", { id: returnReq.id, message: err.message });
+  }
+}
+
 app.use("/view-uploads", express.static(path.join(__dirname, "uploads")));
 
 // ── POST /api/apply ───────────────────────────────────────────────────────────
@@ -447,7 +811,7 @@ app.post(
     }
 
     // 2. Time trap
-    if (!formLoadedAt || now - formLoadedAt < 3000) {
+    if (!TESTING_MODE && (!formLoadedAt || now - formLoadedAt < 3000)) {
       log("warn", "time_trap_triggered", { ip: req.ip });
       return res.status(200).json({ success: true }); // Silent reject
     }
@@ -462,13 +826,16 @@ app.post(
     // 4. Cooldown — prevent duplicate submissions from same email
     const cooldownSql = `
       SELECT id FROM applications
-      WHERE email_address = ? 
+      WHERE email_address = ?
         AND id_number = ?
         AND created_at > DATE_SUB(NOW(), INTERVAL 2 MINUTE)
       LIMIT 1
     `;
+    const cooldownParams = [email_address, id_number];
+    const runCooldown = (cb) =>
+      TESTING_MODE ? cb(null, []) : db.query(cooldownSql, cooldownParams, cb);
 
-    db.query(cooldownSql, [email_address, id_number], (err, rows) => {
+    runCooldown((err, rows) => {
       if (err) {
         log("error", "db_cooldown_check_failed", { message: err.message });
         return res.status(500).json({ error: "Database error." });
@@ -547,6 +914,239 @@ app.post(
         },
       );
     });
+  },
+);
+
+// ── POST /api/contact ─────────────────────────────────────────────────────────
+app.post("/api/contact", submitLimiter, express.json(), async (req, res) => {
+  const metadata = JSON.stringify({
+    ip: req.ip,
+    user_agent: req.get("User-Agent"),
+    referer: req.get("Referer") || "Direct",
+    origin: req.get("Origin") || "Unknown",
+    language: req.get("Accept-Language"),
+  });
+
+  const { full_name, email_address, contact_number, message } = req.body;
+  const now = Date.now();
+  const formLoadedAt = parseInt(req.body.form_loaded_at, 10);
+
+  log("info", "contact_attempt", { email: email_address, ip: req.ip });
+
+  if (!full_name || full_name.trim().length < 3) {
+    return res.status(400).json({ error: "Invalid full name." });
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email_address || "")) {
+    return res.status(400).json({ error: "Invalid email address." });
+  }
+  if (!/^(\+639|09)\d{9}$/.test((contact_number || "").replace(/[\s\-]/g, ""))) {
+    return res.status(400).json({ error: "Invalid Philippine contact number." });
+  }
+  if (!message || message.trim().length < 10) {
+    return res.status(400).json({ error: "Message must be at least 10 characters." });
+  }
+  if (message.length > 5000) {
+    return res.status(400).json({ error: "Message is too long (max 5000 characters)." });
+  }
+
+  if (!TESTING_MODE && (!formLoadedAt || now - formLoadedAt < 3000)) {
+    log("warn", "time_trap_triggered", { ip: req.ip, route: "contact" });
+    return res.status(200).json({ success: true });
+  }
+
+  const dynamicHp = Object.keys(req.body).find((k) => k.startsWith("hp_"));
+  if (dynamicHp && req.body[dynamicHp]) {
+    log("warn", "honeypot_triggered", { ip: req.ip, route: "contact" });
+    return res.status(200).json({ success: true });
+  }
+
+  try {
+    if (!TESTING_MODE) {
+      const dup = await queryAsync(
+        `SELECT id FROM contact_submissions
+           WHERE email_address = ?
+             AND created_at > DATE_SUB(NOW(), INTERVAL 2 MINUTE)
+           LIMIT 1`,
+        [email_address],
+      );
+      if (dup.length) {
+        log("info", "contact_duplicate_ignored", { email: email_address });
+        return res.status(200).json({
+          success: true,
+          message: "We already received your message. We'll be in touch soon!",
+        });
+      }
+    }
+
+    const result = await queryAsync(
+      `INSERT INTO contact_submissions
+         (full_name, email_address, contact_number, message, metadata)
+       VALUES (?, ?, ?, ?, ?)`,
+      [full_name, email_address, contact_number, message, metadata],
+    );
+
+    log("info", "contact_saved", {
+      id: result.insertId,
+      email: email_address,
+      ip: req.ip,
+    });
+
+    res.json({
+      success: true,
+      message: "Message sent! Please check your email for confirmation.",
+      id: result.insertId,
+    });
+
+    sendContactEmails(
+      {
+        id: result.insertId,
+        full_name,
+        email_address,
+        contact_number,
+        message,
+      },
+      metadata,
+    );
+  } catch (err) {
+    log("error", "contact_insert_failed", {
+      message: err.message,
+      email: email_address,
+    });
+    res.status(500).json({ error: "Failed to save message." });
+  }
+});
+
+// ── POST /api/returns ─────────────────────────────────────────────────────────
+app.post(
+  "/api/returns",
+  submitLimiter,
+  returnsUpload.array("attachments", 5),
+  async (req, res) => {
+    const metadata = JSON.stringify({
+      ip: req.ip,
+      user_agent: req.get("User-Agent"),
+      referer: req.get("Referer") || "Direct",
+      origin: req.get("Origin") || "Unknown",
+      language: req.get("Accept-Language"),
+    });
+
+    const {
+      full_name,
+      email_address,
+      contact_number,
+      order_number,
+      items_to_return,
+      reason,
+    } = req.body;
+
+    const now = Date.now();
+    const formLoadedAt = parseInt(req.body.form_loaded_at, 10);
+
+    log("info", "return_attempt", { email: email_address, ip: req.ip });
+
+    if (!full_name || full_name.trim().length < 3) {
+      return res.status(400).json({ error: "Invalid full name." });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email_address || "")) {
+      return res.status(400).json({ error: "Invalid email address." });
+    }
+    if (!/^(\+639|09)\d{9}$/.test((contact_number || "").replace(/[\s\-]/g, ""))) {
+      return res.status(400).json({ error: "Invalid Philippine contact number." });
+    }
+    if (!order_number || order_number.trim().length < 3) {
+      return res.status(400).json({ error: "Invalid order number." });
+    }
+    if (!items_to_return || items_to_return.trim().length < 2) {
+      return res.status(400).json({ error: "Please list the items to return." });
+    }
+    if (!reason || reason.trim().length < 5) {
+      return res.status(400).json({ error: "Please provide a reason." });
+    }
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: "At least one image attachment is required." });
+    }
+
+    if (!TESTING_MODE && (!formLoadedAt || now - formLoadedAt < 3000)) {
+      log("warn", "time_trap_triggered", { ip: req.ip, route: "returns" });
+      return res.status(200).json({ success: true });
+    }
+
+    const dynamicHp = Object.keys(req.body).find((k) => k.startsWith("hp_"));
+    if (dynamicHp && req.body[dynamicHp]) {
+      log("warn", "honeypot_triggered", { ip: req.ip, route: "returns" });
+      return res.status(200).json({ success: true });
+    }
+
+    try {
+      if (!TESTING_MODE) {
+        const dup = await queryAsync(
+          `SELECT id FROM return_requests
+             WHERE email_address = ?
+               AND order_number = ?
+               AND created_at > DATE_SUB(NOW(), INTERVAL 2 MINUTE)
+             LIMIT 1`,
+          [email_address, order_number],
+        );
+        if (dup.length) {
+          log("info", "return_duplicate_ignored", { email: email_address });
+          return res.status(200).json({
+            success: true,
+            message: "We already received this request. No need to submit again!",
+          });
+        }
+      }
+
+      const imagePaths = req.files.map((f) => f.path).join(",");
+
+      const result = await queryAsync(
+        `INSERT INTO return_requests
+           (full_name, email_address, contact_number, order_number, items_to_return, reason, image_paths, metadata)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          full_name,
+          email_address,
+          contact_number,
+          order_number,
+          items_to_return,
+          reason,
+          imagePaths,
+          metadata,
+        ],
+      );
+
+      log("info", "return_saved", {
+        id: result.insertId,
+        email: email_address,
+        ip: req.ip,
+        attachmentCount: req.files.length,
+      });
+
+      res.json({
+        success: true,
+        message: "Return request submitted! Please check your email for confirmation.",
+        id: result.insertId,
+      });
+
+      sendReturnEmails(
+        {
+          id: result.insertId,
+          full_name,
+          email_address,
+          contact_number,
+          order_number,
+          items_to_return,
+          reason,
+        },
+        req.files,
+        metadata,
+      );
+    } catch (err) {
+      log("error", "return_insert_failed", {
+        message: err.message,
+        email: email_address,
+      });
+      res.status(500).json({ error: "Failed to save return request." });
+    }
   },
 );
 
@@ -645,11 +1245,6 @@ app.get("/api/submissions", (req, res) => {
 });
 
 // ── PATCH /api/submissions/:id/status ────────────────────────────────────────
-const queryAsync = (sql, params) =>
-  new Promise((resolve, reject) =>
-    db.query(sql, params, (err, rows) => (err ? reject(err) : resolve(rows))),
-  );
-
 app.patch("/api/submissions/:id/status", async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -665,12 +1260,20 @@ app.patch("/api/submissions/:id/status", async (req, res) => {
   }
 
   const id = parseInt(req.params.id, 10);
-  const { status } = req.body || {};
+  const { status, reason } = req.body || {};
   if (!Number.isInteger(id) || id < 1) {
     return res.status(400).json({ error: "Invalid id" });
   }
   if (!["pending", "approved", "rejected"].includes(status)) {
     return res.status(400).json({ error: "Invalid status" });
+  }
+
+  const trimmedReason =
+    typeof reason === "string" ? reason.trim().slice(0, 2000) : "";
+  if (status === "rejected" && trimmedReason.length < 5) {
+    return res
+      .status(400)
+      .json({ error: "A rejection reason of at least 5 characters is required." });
   }
 
   try {
@@ -694,7 +1297,7 @@ app.patch("/api/submissions/:id/status", async (req, res) => {
       const { code, priceRuleId } = await createDiscountForApplicant(applicant);
       await queryAsync(
         `UPDATE applications
-           SET status = 'approved', discount_code = ?, discount_price_rule_id = ?
+           SET status = 'approved', discount_code = ?, discount_price_rule_id = ?, rejection_reason = NULL
            WHERE id = ?`,
         [code, priceRuleId, id],
       );
@@ -705,6 +1308,8 @@ app.patch("/api/submissions/:id/status", async (req, res) => {
 
       return res.json({ success: true, id, status: "approved", code });
     }
+
+    const wasRejected = applicant.status === "rejected";
 
     // Reverting or rejecting a previously-approved row: delete the discount.
     if (status !== "approved" && applicant.discount_price_rule_id) {
@@ -719,15 +1324,19 @@ app.patch("/api/submissions/:id/status", async (req, res) => {
       }
       await queryAsync(
         `UPDATE applications
-           SET status = ?, discount_code = NULL, discount_price_rule_id = NULL
+           SET status = ?, discount_code = NULL, discount_price_rule_id = NULL, rejection_reason = ?
            WHERE id = ?`,
-        [status, id],
+        [status, status === "rejected" ? trimmedReason : null, id],
       );
     } else {
-      await queryAsync("UPDATE applications SET status = ? WHERE id = ?", [
-        status,
-        id,
-      ]);
+      await queryAsync(
+        "UPDATE applications SET status = ?, rejection_reason = ? WHERE id = ?",
+        [status, status === "rejected" ? trimmedReason : null, id],
+      );
+    }
+
+    if (status === "rejected" && !wasRejected) {
+      sendRejectionEmail(applicant, trimmedReason);
     }
 
     log("info", "submission_status_updated", { id, status, ip: req.ip });
@@ -811,6 +1420,181 @@ app.use("/admin-dashboard", (req, res, next) => {
   // }
   // Serve other assets (css/js) normally
   express.static(path.join(__dirname, "admin-portal"))(req, res, next);
+});
+
+// ── GET /api/contact-submissions ──────────────────────────────────────────────
+app.get("/api/contact-submissions", requireAdmin, async (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
+  const offset = (page - 1) * limit;
+  const search = (req.query.search || "").trim();
+  const dateFrom = (req.query.date_from || "").trim();
+  const dateTo = (req.query.date_to || "").trim();
+
+  const whereClauses = [];
+  const whereParams = [];
+  if (search) {
+    whereClauses.push("(full_name LIKE ? OR email_address LIKE ? OR message LIKE ?)");
+    const like = `%${search}%`;
+    whereParams.push(like, like, like);
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateFrom)) {
+    whereClauses.push("created_at >= ?");
+    whereParams.push(`${dateFrom} 00:00:00`);
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {
+    whereClauses.push("created_at <= ?");
+    whereParams.push(`${dateTo} 23:59:59`);
+  }
+  const whereSql = whereClauses.length ? ` WHERE ${whereClauses.join(" AND ")}` : "";
+
+  try {
+    const countRows = await queryAsync(
+      `SELECT COUNT(*) AS total FROM contact_submissions${whereSql}`,
+      whereParams,
+    );
+    const totalItems = countRows[0].total;
+    const data = await queryAsync(
+      `SELECT * FROM contact_submissions${whereSql} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+      [...whereParams, limit, offset],
+    );
+    res.json({
+      metadata: {
+        total_items: totalItems,
+        total_pages: Math.ceil(totalItems / limit) || 1,
+        current_page: page,
+      },
+      data,
+    });
+  } catch (err) {
+    log("error", "contact_list_failed", { message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── PATCH /api/contact-submissions/:id/status ────────────────────────────────
+app.patch("/api/contact-submissions/:id/status", requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const { status } = req.body || {};
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: "Invalid id" });
+  }
+  if (!["pending", "resolved"].includes(status)) {
+    return res.status(400).json({ error: "Invalid status" });
+  }
+  try {
+    const result = await queryAsync(
+      "UPDATE contact_submissions SET status = ? WHERE id = ?",
+      [status, id],
+    );
+    if (!result.affectedRows) {
+      return res.status(404).json({ error: "Message not found" });
+    }
+    log("info", "contact_status_updated", { id, status, ip: req.ip });
+    res.json({ success: true, id, status });
+  } catch (err) {
+    log("error", "contact_status_update_failed", { id, message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/return-requests ──────────────────────────────────────────────────
+app.get("/api/return-requests", requireAdmin, async (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
+  const offset = (page - 1) * limit;
+  const search = (req.query.search || "").trim();
+  const dateFrom = (req.query.date_from || "").trim();
+  const dateTo = (req.query.date_to || "").trim();
+
+  const whereClauses = [];
+  const whereParams = [];
+  if (search) {
+    whereClauses.push(
+      "(full_name LIKE ? OR email_address LIKE ? OR order_number LIKE ? OR items_to_return LIKE ?)",
+    );
+    const like = `%${search}%`;
+    whereParams.push(like, like, like, like);
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateFrom)) {
+    whereClauses.push("created_at >= ?");
+    whereParams.push(`${dateFrom} 00:00:00`);
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {
+    whereClauses.push("created_at <= ?");
+    whereParams.push(`${dateTo} 23:59:59`);
+  }
+  const whereSql = whereClauses.length ? ` WHERE ${whereClauses.join(" AND ")}` : "";
+
+  try {
+    const countRows = await queryAsync(
+      `SELECT COUNT(*) AS total FROM return_requests${whereSql}`,
+      whereParams,
+    );
+    const totalItems = countRows[0].total;
+    const data = await queryAsync(
+      `SELECT * FROM return_requests${whereSql} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+      [...whereParams, limit, offset],
+    );
+    res.json({
+      metadata: {
+        total_items: totalItems,
+        total_pages: Math.ceil(totalItems / limit) || 1,
+        current_page: page,
+      },
+      data,
+    });
+  } catch (err) {
+    log("error", "returns_list_failed", { message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── PATCH /api/return-requests/:id/status ────────────────────────────────────
+app.patch("/api/return-requests/:id/status", requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const { status, reason } = req.body || {};
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: "Invalid id" });
+  }
+  if (!["pending", "approved", "rejected"].includes(status)) {
+    return res.status(400).json({ error: "Invalid status" });
+  }
+
+  const trimmedReason =
+    typeof reason === "string" ? reason.trim().slice(0, 2000) : "";
+  if (status === "rejected" && trimmedReason.length < 5) {
+    return res
+      .status(400)
+      .json({ error: "A rejection reason of at least 5 characters is required." });
+  }
+
+  try {
+    const rows = await queryAsync("SELECT * FROM return_requests WHERE id = ?", [id]);
+    if (!rows.length) {
+      return res.status(404).json({ error: "Return request not found" });
+    }
+    const returnReq = rows[0];
+    const wasRejected = returnReq.status === "rejected";
+
+    await queryAsync(
+      "UPDATE return_requests SET status = ?, rejection_reason = ? WHERE id = ?",
+      [status, status === "rejected" ? trimmedReason : null, id],
+    );
+    log("info", "return_status_updated", { id, status, ip: req.ip });
+
+    if (status === "approved" && returnReq.status !== "approved") {
+      sendReturnApprovalEmail(returnReq);
+    }
+    if (status === "rejected" && !wasRejected) {
+      sendReturnRejectionEmail(returnReq, trimmedReason);
+    }
+
+    res.json({ success: true, id, status });
+  } catch (err) {
+    log("error", "return_status_update_failed", { id, message: err.message });
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ── Global error handler ──────────────────────────────────────────────────────
