@@ -136,7 +136,7 @@ db.getConnection((err, conn) => {
   } else {
     log("info", "db_connected");
     conn.release();
-    ensureStatusColumn();
+    // ensureStatusColumn();
     ensureContactTable();
     ensureReturnsTable();
   }
@@ -173,7 +173,8 @@ function ensureStatusColumn() {
   ensureColumn("discount_code", "VARCHAR(64) NULL");
   ensureColumn("discount_price_rule_id", "BIGINT NULL");
   ensureColumn("rejection_reason", "TEXT NULL");
-  ensureColumnFor("return_requests", "rejection_reason", "TEXT NULL");
+  ensureColumn("discount_code_id", "BIGINT NULL");
+  // ensureColumnFor("return_requests", "rejection_reason", "TEXT NULL");
 }
 
 function ensureContactTable() {
@@ -209,6 +210,7 @@ function ensureReturnsTable() {
        reason TEXT NOT NULL,
        image_paths TEXT,
        status ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending',
+       rejection_reason TEXT NULL,
        metadata TEXT,
        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
        INDEX idx_returns_email (email_address),
@@ -217,7 +219,10 @@ function ensureReturnsTable() {
      )`,
     (err) => {
       if (err) log("error", "migration_returns_table_failed", { message: err.message });
-      else log("info", "migration_returns_table_ready");
+      else {
+        log("info", "migration_returns_table_ready");
+        ensureStatusColumn();
+      }
     },
   );
 }
@@ -443,6 +448,8 @@ async function createDiscountForApplicant(applicant) {
       value: `-${DISCOUNT_PERCENTAGE}`,
       customer_selection: "prerequisite",
       prerequisite_customer_ids: [customerId],
+      usage_limit: 1,
+      once_per_customer: true,
       starts_at: new Date().toISOString(),
       combines_with: {
         product_discounts: true,
@@ -456,10 +463,20 @@ async function createDiscountForApplicant(applicant) {
   await shopifyFetch(
     "POST",
     `/price_rules/${priceRule.price_rule.id}/discount_codes.json`,
-    { discount_code: { code } },
+    { discount_code: { code, usage_limit: 1 } },
   );
 
-  return { code, priceRuleId: priceRule.price_rule.id };
+  const codeRes = await shopifyFetch(
+    "POST",
+    `/price_rules/${priceRule.price_rule.id}/discount_codes.json`,
+    { discount_code: { code } }
+  );
+
+  return { 
+    code, 
+    priceRuleId: priceRule.price_rule.id,
+    discountCodeId: codeRes.discount_code.id,
+  };
 }
 
 async function deleteDiscountPriceRule(priceRuleId) {
@@ -481,6 +498,11 @@ async function sendApprovalEmail(applicant, code) {
           <p style="margin: 0 0 8px 0; color: #555;">Your personal discount code:</p>
           <p style="margin: 0; font-size: 28px; font-weight: bold; color: #15803d; letter-spacing: 2px;">${code}</p>
           <p style="margin: 12px 0 0 0; font-size: 13px; color: #555;">${DISCOUNT_PERCENTAGE}% off — tied to your email address.</p>
+        </div>
+
+        <div style="background-color: #fff7ed; border: 1px solid #f97316; padding: 15px; border-radius: 8px; margin: 20px 0;">
+          <strong style="color: #c2410c;">⚠️ Important:</strong>
+          <p style="margin: 8px 0 0 0; color: #7c2d12;">This code can only be used <strong>once</strong>. Please make sure your order is complete and correct before applying it at checkout. The code will expire after a single use and cannot be reissued.</p>
         </div>
 
         <p><strong>How to use it:</strong></p>
@@ -1297,9 +1319,9 @@ app.patch("/api/submissions/:id/status", async (req, res) => {
       const { code, priceRuleId } = await createDiscountForApplicant(applicant);
       await queryAsync(
         `UPDATE applications
-           SET status = 'approved', discount_code = ?, discount_price_rule_id = ?, rejection_reason = NULL
-           WHERE id = ?`,
-        [code, priceRuleId, id],
+          SET status = 'approved', discount_code = ?, discount_price_rule_id = ?, discount_code_id = ?, rejection_reason = NULL
+          WHERE id = ?`,
+        [code, priceRuleId, discountCodeId, id],
       );
       log("info", "submission_approved", { id, code, ip: req.ip });
 
@@ -1348,6 +1370,42 @@ app.patch("/api/submissions/:id/status", async (req, res) => {
       message: err.message,
     });
     res.status(502).json({ error: err.message });
+  }
+});
+
+// ── GET /api/submissions/:id/discount-usage ───────────────────────────────
+app.get("/api/submissions/:id/discount-usage", requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: "Invalid id" });
+  }
+
+  try {
+    const rows = await queryAsync(
+      "SELECT discount_price_rule_id, discount_code_id, discount_code FROM applications WHERE id = ?",
+      [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: "Not found" });
+
+    const { discount_price_rule_id, discount_code_id, discount_code } = rows[0];
+    if (!discount_price_rule_id || !discount_code_id) {
+      return res.json({ used: false, usage_count: 0, code: null });
+    }
+
+    const data = await shopifyFetch(
+      "GET",
+      `/price_rules/${discount_price_rule_id}/discount_codes/${discount_code_id}.json`
+    );
+
+    const usageCount = data?.discount_code?.usage_count ?? 0;
+    res.json({
+      code: discount_code,
+      usage_count: usageCount,
+      used: usageCount >= 1,
+    });
+  } catch (err) {
+    log("error", "discount_usage_check_failed", { id, message: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
