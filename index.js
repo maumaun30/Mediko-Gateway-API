@@ -4,6 +4,7 @@ const mysql = require("mysql2");
 const multer = require("multer");
 const nodemailer = require("nodemailer");
 const path = require("path");
+const fs = require("fs");
 const crypto = require("crypto");
 const cors = require("cors");
 const rateLimit = require("express-rate-limit");
@@ -121,6 +122,55 @@ const returnsUpload = multer({
     }
   },
 });
+
+// ── Image optimizer client ────────────────────────────────────────────────────
+// Posts the file to the optimizer service, polls until ready, downloads the
+// converted bytes, writes them next to the original (with a .webp extension by
+// default), then deletes the original. Returns the new on-disk path. Callers
+// should fall back to the original path on throw.
+async function optimizeImage(filePath, { format = "webp", width = 1200 } = {}) {
+  const baseUrl = process.env.IMAGE_OPTIMIZER_URL;
+  if (!baseUrl) throw new Error("IMAGE_OPTIMIZER_URL not set");
+
+  const fileBuffer = await fs.promises.readFile(filePath);
+  const filename = path.basename(filePath);
+
+  const form = new FormData();
+  form.append("files", new Blob([fileBuffer]), filename);
+  const uploadRes = await fetch(
+    `${baseUrl}/images/upload?format=${format}&width=${width}`,
+    { method: "POST", body: form },
+  );
+  if (!uploadRes.ok) throw new Error(`upload ${uploadRes.status}`);
+  const { jobs } = await uploadRes.json();
+  const jobId = jobs[0].id;
+
+  const pollStart = Date.now();
+  while (true) {
+    if (Date.now() - pollStart > 60_000) throw new Error("poll timeout");
+    await new Promise((r) => setTimeout(r, 1500));
+    const s = await fetch(`${baseUrl}/images/status/${jobId}`);
+    if (!s.ok) throw new Error(`status ${s.status}`);
+    const job = await s.json();
+    if (job.status === "ready") break;
+    if (job.status === "failed" || job.status === "expired") {
+      throw new Error(`job ${job.status}: ${job.error_message || ""}`);
+    }
+  }
+
+  const dl = await fetch(`${baseUrl}/images/download/${jobId}`);
+  if (!dl.ok) throw new Error(`download ${dl.status}`);
+  const buf = Buffer.from(await dl.arrayBuffer());
+
+  const dir = path.dirname(filePath);
+  const stem = path.basename(filePath, path.extname(filePath));
+  const newPath = path.join(dir, `${stem}.${format}`);
+  await fs.promises.writeFile(newPath, buf);
+  if (newPath !== filePath) {
+    await fs.promises.unlink(filePath).catch(() => {});
+  }
+  return newPath;
+}
 
 // ── Database ──────────────────────────────────────────────────────────────────
 const db = mysql.createPool({
@@ -364,6 +414,7 @@ async function sendApplicationEmails(application, reqFiles, metadataStr) {
 // ── Shopify Admin API ─────────────────────────────────────────────────────────
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2026-04";
 const DISCOUNT_PERCENTAGE = parseFloat(process.env.DISCOUNT_PERCENTAGE || "20");
+const DISCOUNT_AUTOGEN_ENABLED = process.env.DISCOUNT_AUTOGEN_ENABLED !== "false";
 
 function shopifyConfigured() {
   return Boolean(
@@ -469,7 +520,7 @@ async function createDiscountForApplicant(applicant) {
           items: { all: true },
         },
         combinesWith: {
-          productDiscounts: true,
+          productDiscounts: false,
           orderDiscounts: true,
           shippingDiscounts: true,
         },
@@ -943,19 +994,48 @@ app.post(
             id: result.insertId,
           });
 
-          // Send emails in the background
-          sendApplicationEmails(
-            {
-              full_name,
-              email_address,
-              id_number,
-              birthday,
-              contact_number,
-              insertId: result.insertId,
-            },
-            req.files,
-            metadata,
-          );
+          // Send emails (originals attached), then optimize on disk and update
+          // the row's path. Email goes out before originals are deleted.
+          (async () => {
+            await sendApplicationEmails(
+              {
+                full_name,
+                email_address,
+                id_number,
+                birthday,
+                contact_number,
+                insertId: result.insertId,
+              },
+              req.files,
+              metadata,
+            );
+
+            const finalPaths = [];
+            for (const f of req.files) {
+              try {
+                finalPaths.push(await optimizeImage(f.path));
+              } catch (err) {
+                log("error", "apply_optimize_failed", {
+                  appId: result.insertId,
+                  file: f.path,
+                  message: err.message,
+                });
+                finalPaths.push(f.path);
+              }
+            }
+
+            try {
+              await queryAsync(
+                "UPDATE applications SET id_photo_path = ? WHERE id = ?",
+                [finalPaths.join(","), result.insertId],
+              );
+            } catch (err) {
+              log("error", "apply_path_update_failed", {
+                appId: result.insertId,
+                message: err.message,
+              });
+            }
+          })();
         },
       );
     });
@@ -1172,19 +1252,47 @@ app.post(
         id: result.insertId,
       });
 
-      sendReturnEmails(
-        {
-          id: result.insertId,
-          full_name,
-          email_address,
-          contact_number,
-          order_number,
-          items_to_return,
-          reason,
-        },
-        req.files,
-        metadata,
-      );
+      (async () => {
+        await sendReturnEmails(
+          {
+            id: result.insertId,
+            full_name,
+            email_address,
+            contact_number,
+            order_number,
+            items_to_return,
+            reason,
+          },
+          req.files,
+          metadata,
+        );
+
+        const finalPaths = [];
+        for (const f of req.files) {
+          try {
+            finalPaths.push(await optimizeImage(f.path));
+          } catch (err) {
+            log("error", "return_optimize_failed", {
+              returnId: result.insertId,
+              file: f.path,
+              message: err.message,
+            });
+            finalPaths.push(f.path);
+          }
+        }
+
+        try {
+          await queryAsync(
+            "UPDATE return_requests SET image_paths = ? WHERE id = ?",
+            [finalPaths.join(","), result.insertId],
+          );
+        } catch (err) {
+          log("error", "return_path_update_failed", {
+            returnId: result.insertId,
+            message: err.message,
+          });
+        }
+      })();
     } catch (err) {
       log("error", "return_insert_failed", {
         message: err.message,
@@ -1333,6 +1441,20 @@ app.patch("/api/submissions/:id/status", async (req, res) => {
 
     // Approving a pending row: create the Shopify discount.
     if (status === "approved" && applicant.status !== "approved") {
+      if (!DISCOUNT_AUTOGEN_ENABLED) {
+        await queryAsync(
+          `UPDATE applications
+            SET status = 'approved', rejection_reason = NULL
+            WHERE id = ?`,
+          [id],
+        );
+        log("info", "submission_approved", {
+          id,
+          ip: req.ip,
+          autogen: false,
+        });
+        return res.json({ success: true, id, status: "approved", code: null });
+      }
       if (!shopifyConfigured()) {
         return res.status(503).json({
           error:
