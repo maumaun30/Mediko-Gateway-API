@@ -174,6 +174,7 @@ function ensureStatusColumn() {
   ensureColumn("discount_price_rule_id", "BIGINT NULL");
   ensureColumn("rejection_reason", "TEXT NULL");
   ensureColumn("discount_code_id", "BIGINT NULL");
+  ensureColumn("discount_node_gid", "VARCHAR(255) NULL");
   // ensureColumnFor("return_requests", "rejection_reason", "TEXT NULL");
 }
 
@@ -361,7 +362,7 @@ async function sendApplicationEmails(application, reqFiles, metadataStr) {
 }
 
 // ── Shopify Admin API ─────────────────────────────────────────────────────────
-const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2024-10";
+const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2026-04";
 const DISCOUNT_PERCENTAGE = parseFloat(process.env.DISCOUNT_PERCENTAGE || "20");
 
 function shopifyConfigured() {
@@ -370,64 +371,75 @@ function shopifyConfigured() {
   );
 }
 
-async function shopifyFetch(method, pathSuffix, body) {
-  const url = `https://${process.env.SHOPIFY_SHOP_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}${pathSuffix}`;
+async function shopifyGraphQL(query, variables = {}) {
+  const url = `https://${process.env.SHOPIFY_SHOP_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
   const res = await fetch(url, {
-    method,
+    method: "POST",
     headers: {
       "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN,
       "Content-Type": "application/json",
       Accept: "application/json",
     },
-    body: body ? JSON.stringify(body) : undefined,
+    body: JSON.stringify({ query, variables }),
   });
 
-  if (res.status === 204) return null;
+  const json = await res.json().catch(() => null);
 
-  const text = await res.text();
-  let json = null;
-  try {
-    json = text ? JSON.parse(text) : null;
-  } catch {
-    /* not JSON */
-  }
-
-  if (!res.ok) {
-    const msg =
-      (json && (json.errors || json.error)) || `Shopify ${res.status}`;
-    const err = new Error(
-      typeof msg === "string" ? msg : JSON.stringify(msg),
-    );
+  if (!res.ok || !json) {
+    const err = new Error(`Shopify ${res.status}`);
     err.status = res.status;
     throw err;
   }
-  return json;
+  if (Array.isArray(json.errors) && json.errors.length) {
+    throw new Error(json.errors.map((e) => e.message).join("; "));
+  }
+  return json.data;
+}
+
+function throwIfUserErrors(userErrors, op) {
+  if (Array.isArray(userErrors) && userErrors.length) {
+    const msg = userErrors
+      .map((e) => `${(e.field || []).join(".")}: ${e.message}`)
+      .join("; ");
+    throw new Error(`${op}: ${msg}`);
+  }
 }
 
 async function findOrCreateShopifyCustomer(applicant) {
-  const emailQuery = encodeURIComponent(`email:${applicant.email_address}`);
-  const search = await shopifyFetch(
-    "GET",
-    `/customers/search.json?query=${emailQuery}`,
+  const searchData = await shopifyGraphQL(
+    `query findCustomer($q: String!) {
+       customers(first: 1, query: $q) {
+         edges { node { id } }
+       }
+     }`,
+    { q: `email:${applicant.email_address}` },
   );
-  if (search?.customers?.length) {
-    return search.customers[0].id;
-  }
+  const existing = searchData?.customers?.edges?.[0]?.node?.id;
+  if (existing) return existing;
 
   const [firstName, ...rest] = (applicant.full_name || "").trim().split(/\s+/);
   const lastName = rest.join(" ") || firstName;
 
-  const created = await shopifyFetch("POST", "/customers.json", {
-    customer: {
-      email: applicant.email_address,
-      first_name: firstName,
-      last_name: lastName,
-      phone: applicant.contact_number,
-      tags: "senior-pwd-discount",
-      verified_email: true,
+  const createData = await shopifyGraphQL(
+    `mutation createCustomer($input: CustomerInput!) {
+       customerCreate(input: $input) {
+         customer { id }
+         userErrors { field message }
+       }
+     }`,
+    {
+      input: {
+        email: applicant.email_address,
+        firstName,
+        lastName,
+        phone: applicant.contact_number,
+        tags: ["senior-pwd-discount"],
+      },
     },
-  });
-  return created.customer.id;
+  );
+
+  throwIfUserErrors(createData?.customerCreate?.userErrors, "customerCreate");
+  return createData.customerCreate.customer.id;
 }
 
 function generateDiscountCode(appId) {
@@ -436,45 +448,62 @@ function generateDiscountCode(appId) {
 }
 
 async function createDiscountForApplicant(applicant) {
-  const customerId = await findOrCreateShopifyCustomer(applicant);
+  const customerGid = await findOrCreateShopifyCustomer(applicant);
+  const code = generateDiscountCode(applicant.id);
 
-  const priceRule = await shopifyFetch("POST", "/price_rules.json", {
-    price_rule: {
-      title: `Mediko Senior/PWD - App #${applicant.id}`,
-      target_type: "line_item",
-      target_selection: "all",
-      allocation_method: "across",
-      value_type: "percentage",
-      value: `-${DISCOUNT_PERCENTAGE}`,
-      customer_selection: "prerequisite",
-      prerequisite_customer_ids: [customerId],
-      usage_limit: 1,
-      once_per_customer: true,
-      starts_at: new Date().toISOString(),
-      combines_with: {
-        product_discounts: true,
-        order_discounts: true,
-        shipping_discounts: true,
+  const data = await shopifyGraphQL(
+    `mutation createDiscount($basicCodeDiscount: DiscountCodeBasicInput!) {
+       discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
+         codeDiscountNode { id }
+         userErrors { field code message }
+       }
+     }`,
+    {
+      basicCodeDiscount: {
+        title: `Mediko Senior/PWD - App #${applicant.id}`,
+        code,
+        startsAt: new Date().toISOString(),
+        customerSelection: { customers: { add: [customerGid] } },
+        customerGets: {
+          value: { percentage: DISCOUNT_PERCENTAGE / 100 },
+          items: { all: true },
+        },
+        combinesWith: {
+          productDiscounts: true,
+          orderDiscounts: true,
+          shippingDiscounts: true,
+        },
+        usageLimit: 1,
+        appliesOncePerCustomer: true,
       },
     },
-  });
+  );
 
-  const code = generateDiscountCode(applicant.id);
-  const codeRes = await shopifyFetch(
-    "POST",
-    `/price_rules/${priceRule.price_rule.id}/discount_codes.json`,
-    { discount_code: { code } },
+  throwIfUserErrors(
+    data?.discountCodeBasicCreate?.userErrors,
+    "discountCodeBasicCreate",
   );
 
   return {
     code,
-    priceRuleId: priceRule.price_rule.id,
-    discountCodeId: codeRes.discount_code.id,
+    nodeGid: data.discountCodeBasicCreate.codeDiscountNode.id,
   };
 }
 
-async function deleteDiscountPriceRule(priceRuleId) {
-  await shopifyFetch("DELETE", `/price_rules/${priceRuleId}.json`);
+async function deleteDiscount(nodeGid) {
+  const data = await shopifyGraphQL(
+    `mutation deleteDiscount($id: ID!) {
+       discountCodeDelete(id: $id) {
+         deletedCodeDiscountId
+         userErrors { field code message }
+       }
+     }`,
+    { id: nodeGid },
+  );
+  throwIfUserErrors(
+    data?.discountCodeDelete?.userErrors,
+    "discountCodeDelete",
+  );
 }
 
 // ── Approval email ────────────────────────────────────────────────────────────
@@ -1310,12 +1339,12 @@ app.patch("/api/submissions/:id/status", async (req, res) => {
             "Shopify is not configured. Set SHOPIFY_SHOP_DOMAIN and SHOPIFY_ADMIN_TOKEN.",
         });
       }
-      const { code, priceRuleId, discountCodeId } = await createDiscountForApplicant(applicant);
+      const { code, nodeGid } = await createDiscountForApplicant(applicant);
       await queryAsync(
         `UPDATE applications
-          SET status = 'approved', discount_code = ?, discount_price_rule_id = ?, discount_code_id = ?, rejection_reason = NULL
+          SET status = 'approved', discount_code = ?, discount_node_gid = ?, rejection_reason = NULL
           WHERE id = ?`,
-        [code, priceRuleId, discountCodeId, id],
+        [code, nodeGid, id],
       );
       log("info", "submission_approved", { id, code, ip: req.ip });
 
@@ -1328,19 +1357,19 @@ app.patch("/api/submissions/:id/status", async (req, res) => {
     const wasRejected = applicant.status === "rejected";
 
     // Reverting or rejecting a previously-approved row: delete the discount.
-    if (status !== "approved" && applicant.discount_price_rule_id) {
+    if (status !== "approved" && applicant.discount_node_gid) {
       try {
-        await deleteDiscountPriceRule(applicant.discount_price_rule_id);
+        await deleteDiscount(applicant.discount_node_gid);
       } catch (e) {
         log("warn", "shopify_delete_failed", {
           id,
-          priceRuleId: applicant.discount_price_rule_id,
+          nodeGid: applicant.discount_node_gid,
           message: e.message,
         });
       }
       await queryAsync(
         `UPDATE applications
-           SET status = ?, discount_code = NULL, discount_price_rule_id = NULL, discount_price_rule_id = NULL, rejection_reason = ?
+           SET status = ?, discount_code = NULL, discount_node_gid = NULL, rejection_reason = ?
            WHERE id = ?`,
         [status, status === "rejected" ? trimmedReason : null, id],
       );
@@ -1376,22 +1405,31 @@ app.get("/api/submissions/:id/discount-usage", requireAdmin, async (req, res) =>
 
   try {
     const rows = await queryAsync(
-      "SELECT discount_price_rule_id, discount_code_id, discount_code FROM applications WHERE id = ?",
+      "SELECT discount_node_gid, discount_code FROM applications WHERE id = ?",
       [id]
     );
     if (!rows.length) return res.status(404).json({ error: "Not found" });
 
-    const { discount_price_rule_id, discount_code_id, discount_code } = rows[0];
-    if (!discount_price_rule_id || !discount_code_id) {
+    const { discount_node_gid, discount_code } = rows[0];
+    if (!discount_node_gid) {
       return res.json({ used: false, usage_count: 0, code: null });
     }
 
-    const data = await shopifyFetch(
-      "GET",
-      `/price_rules/${discount_price_rule_id}/discount_codes/${discount_code_id}.json`
+    const data = await shopifyGraphQL(
+      `query discountUsage($id: ID!) {
+         codeDiscountNode(id: $id) {
+           codeDiscount {
+             ... on DiscountCodeBasic {
+               asyncUsageCount
+             }
+           }
+         }
+       }`,
+      { id: discount_node_gid },
     );
 
-    const usageCount = data?.discount_code?.usage_count ?? 0;
+    const usageCount =
+      data?.codeDiscountNode?.codeDiscount?.asyncUsageCount ?? 0;
     res.json({
       code: discount_code,
       usage_count: usageCount,
