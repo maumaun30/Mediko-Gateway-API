@@ -225,6 +225,9 @@ function ensureStatusColumn() {
   ensureColumn("rejection_reason", "TEXT NULL");
   ensureColumn("discount_code_id", "BIGINT NULL");
   ensureColumn("discount_node_gid", "VARCHAR(255) NULL");
+  ensureColumn("assigned_order_gid", "VARCHAR(255) NULL");
+  ensureColumn("assigned_order_name", "VARCHAR(64) NULL");
+  ensureColumn("assigned_tag", "VARCHAR(8) NULL");
   // ensureColumnFor("return_requests", "rejection_reason", "TEXT NULL");
 }
 
@@ -555,6 +558,65 @@ async function deleteDiscount(nodeGid) {
     data?.discountCodeDelete?.userErrors,
     "discountCodeDelete",
   );
+}
+
+// ── Shopify order tagging (Senior/PWD) ────────────────────────────────────────
+const ORDER_TAGS = ["PWD", "SC"];
+
+async function listOrdersForEmail(email) {
+  const data = await shopifyGraphQL(
+    `query customerOrders($q: String!) {
+       orders(first: 20, query: $q, sortKey: CREATED_AT, reverse: true) {
+         edges {
+           node {
+             id
+             name
+             createdAt
+             tags
+             displayFinancialStatus
+             currentTotalPriceSet { shopMoney { amount currencyCode } }
+           }
+         }
+       }
+     }`,
+    { q: `email:"${email}"` },
+  );
+
+  return (data?.orders?.edges || []).map(({ node }) => ({
+    gid: node.id,
+    name: node.name,
+    created_at: node.createdAt,
+    tags: node.tags || [],
+    financial_status: node.displayFinancialStatus,
+    total: node.currentTotalPriceSet?.shopMoney?.amount || null,
+    currency: node.currentTotalPriceSet?.shopMoney?.currencyCode || null,
+  }));
+}
+
+async function addOrderTag(orderGid, tag) {
+  const data = await shopifyGraphQL(
+    `mutation addTags($id: ID!, $tags: [String!]!) {
+       tagsAdd(id: $id, tags: $tags) {
+         node { id }
+         userErrors { field message }
+       }
+     }`,
+    { id: orderGid, tags: [tag] },
+  );
+  throwIfUserErrors(data?.tagsAdd?.userErrors, "tagsAdd");
+}
+
+async function removeOrderTag(orderGid, tag) {
+  const data = await shopifyGraphQL(
+    `mutation removeTags($id: ID!, $tags: [String!]!) {
+       tagsRemove(id: $id, tags: $tags) {
+         node { id }
+         userErrors { field message }
+       }
+     }`,
+    { id: orderGid, tags: [tag] },
+  );
+  throwIfUserErrors(data?.tagsRemove?.userErrors, "tagsRemove");
 }
 
 // ── Approval email ────────────────────────────────────────────────────────────
@@ -1560,6 +1622,141 @@ app.get("/api/submissions/:id/discount-usage", requireAdmin, async (req, res) =>
   } catch (err) {
     log("error", "discount_usage_check_failed", { id, message: err.message });
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/submissions/:id/orders ───────────────────────────────────────────
+// Recent Shopify orders for the applicant's email, for the assign-order picker.
+app.get("/api/submissions/:id/orders", requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: "Invalid id" });
+  }
+  if (!shopifyConfigured()) {
+    return res.status(503).json({
+      error:
+        "Shopify is not configured. Set SHOPIFY_SHOP_DOMAIN and SHOPIFY_ADMIN_TOKEN.",
+    });
+  }
+
+  try {
+    const rows = await queryAsync(
+      "SELECT email_address FROM applications WHERE id = ?",
+      [id],
+    );
+    if (!rows.length) return res.status(404).json({ error: "Not found" });
+
+    const orders = await listOrdersForEmail(rows[0].email_address);
+    res.json({ email: rows[0].email_address, orders });
+  } catch (err) {
+    log("error", "order_list_failed", { id, message: err.message });
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ── POST /api/submissions/:id/assign-order ────────────────────────────────────
+// Assigns one Shopify order to an application and tags it PWD or SC.
+app.post("/api/submissions/:id/assign-order", requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const { order_gid: orderGid, order_name: orderName, tag } = req.body || {};
+
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: "Invalid id" });
+  }
+  if (typeof orderGid !== "string" || !orderGid.startsWith("gid://shopify/Order/")) {
+    return res.status(400).json({ error: "Invalid order_gid" });
+  }
+  if (!ORDER_TAGS.includes(tag)) {
+    return res.status(400).json({ error: `Tag must be one of: ${ORDER_TAGS.join(", ")}` });
+  }
+  if (!shopifyConfigured()) {
+    return res.status(503).json({
+      error:
+        "Shopify is not configured. Set SHOPIFY_SHOP_DOMAIN and SHOPIFY_ADMIN_TOKEN.",
+    });
+  }
+
+  try {
+    const rows = await queryAsync(
+      "SELECT assigned_order_gid, assigned_tag FROM applications WHERE id = ?",
+      [id],
+    );
+    if (!rows.length) return res.status(404).json({ error: "Not found" });
+
+    const prev = rows[0];
+
+    // Re-assigning: strip the old tag off the previous order first.
+    const movedOrder =
+      prev.assigned_order_gid && prev.assigned_order_gid !== orderGid;
+    const changedTag =
+      prev.assigned_order_gid === orderGid && prev.assigned_tag && prev.assigned_tag !== tag;
+
+    if ((movedOrder || changedTag) && prev.assigned_tag) {
+      try {
+        await removeOrderTag(prev.assigned_order_gid, prev.assigned_tag);
+      } catch (e) {
+        log("warn", "order_untag_failed", {
+          id,
+          orderGid: prev.assigned_order_gid,
+          tag: prev.assigned_tag,
+          message: e.message,
+        });
+      }
+    }
+
+    await addOrderTag(orderGid, tag);
+
+    await queryAsync(
+      `UPDATE applications
+         SET assigned_order_gid = ?, assigned_order_name = ?, assigned_tag = ?
+         WHERE id = ?`,
+      [orderGid, typeof orderName === "string" ? orderName.slice(0, 64) : null, tag, id],
+    );
+
+    log("info", "order_assigned", { id, orderGid, tag, ip: req.ip });
+    res.json({ success: true, id, order_gid: orderGid, order_name: orderName, tag });
+  } catch (err) {
+    log("error", "order_assign_failed", { id, orderGid, tag, message: err.message });
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ── DELETE /api/submissions/:id/assign-order ──────────────────────────────────
+app.delete("/api/submissions/:id/assign-order", requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: "Invalid id" });
+  }
+
+  try {
+    const rows = await queryAsync(
+      "SELECT assigned_order_gid, assigned_tag FROM applications WHERE id = ?",
+      [id],
+    );
+    if (!rows.length) return res.status(404).json({ error: "Not found" });
+
+    const { assigned_order_gid: orderGid, assigned_tag: tag } = rows[0];
+
+    if (orderGid && tag && shopifyConfigured()) {
+      try {
+        await removeOrderTag(orderGid, tag);
+      } catch (e) {
+        log("warn", "order_untag_failed", { id, orderGid, tag, message: e.message });
+      }
+    }
+
+    await queryAsync(
+      `UPDATE applications
+         SET assigned_order_gid = NULL, assigned_order_name = NULL, assigned_tag = NULL
+         WHERE id = ?`,
+      [id],
+    );
+
+    log("info", "order_unassigned", { id, orderGid, tag, ip: req.ip });
+    res.json({ success: true, id });
+  } catch (err) {
+    log("error", "order_unassign_failed", { id, message: err.message });
+    res.status(502).json({ error: err.message });
   }
 });
 
