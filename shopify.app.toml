@@ -1,0 +1,18 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "ee63d07f77aeb73c3ade6dd713eb40f7"
+application_url = "https://mediko-gateway.quailshack.com/admin-dashboard/"
+embedded = true
+name = "Form Submissions"
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "read_customers,write_customers,read_discounts,write_discounts,read_orders,write_orders"
+optional_scopes = [ ]
+use_legacy_install_flow = false
+
+[auth]
+redirect_urls = [ "http://localhost" ]
+
+[webhooks]
+api_version = "2026-04"
