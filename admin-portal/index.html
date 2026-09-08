@@ -5,7 +5,20 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Mediko Admin</title>
+  <link rel="icon" type="image/png" href="/admin-dashboard/favicon.png" />
+  <link rel="apple-touch-icon" href="/admin-dashboard/favicon.png" />
   <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            mediko: {blue: '#187ADC', red: '#BB3A45', ink: '#0F2237'},
+          },
+        },
+      },
+    };
+  </script>
   <style>
     .tab-btn {
       color: #6b7280;
@@ -13,8 +26,8 @@
     }
 
     .tab-btn.active-tab {
-      color: #1d4ed8;
-      border-bottom-color: #1d4ed8;
+      color: #187ADC;
+      border-bottom-color: #187ADC;
     }
 
     .tab-btn:hover:not(.active-tab) {
@@ -28,26 +41,34 @@
 
   <!-- Login overlay (shown when no token yet) -->
   <div id="login-screen" class="fixed inset-0 z-50 flex items-center justify-center bg-gray-100">
-    <div class="bg-white rounded-xl shadow-md p-8 w-full max-w-sm">
-      <h2 class="text-xl font-bold text-gray-800 mb-1">Mediko Admin</h2>
-      <p class="text-sm text-gray-500 mb-5">Enter your admin password to continue.</p>
-      <input id="pw-input" type="password" placeholder="Password"
-        class="w-full border border-gray-300 rounded px-3 py-2 mb-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
-      <p id="login-error" class="text-red-500 text-xs mb-2 hidden">Incorrect password.</p>
-      <button onclick="doLogin()"
-        class="w-full bg-blue-600 text-white py-2 rounded font-medium hover:bg-blue-700 text-sm">Login</button>
+    <div class="bg-white rounded-xl shadow-md w-full max-w-sm overflow-hidden">
+      <div class="bg-mediko-ink px-8 py-6">
+        <img src="/admin-dashboard/mediko-logo-white.svg" alt="Mediko.ph" class="h-8 w-auto" />
+      </div>
+      <div class="p-8">
+        <h2 class="text-lg font-bold text-gray-800 mb-1">Admin dashboard</h2>
+        <p class="text-sm text-gray-500 mb-5">Enter your admin password to continue.</p>
+        <input id="pw-input" type="password" placeholder="Password"
+          class="w-full border border-gray-300 rounded px-3 py-2 mb-3 text-sm focus:outline-none focus:ring-2 focus:ring-mediko-blue" />
+        <p id="login-error" class="text-red-500 text-xs mb-2 hidden">Incorrect password.</p>
+        <button onclick="doLogin()"
+          class="w-full bg-mediko-blue text-white py-2 rounded font-medium hover:brightness-110 text-sm">Login</button>
+      </div>
     </div>
   </div>
 
   <!-- Main dashboard -->
   <div id="main-content" class="max-w-6xl mx-auto hidden">
-    <div class="flex justify-between items-center mb-4">
-      <h1 class="text-2xl font-bold text-gray-800">Mediko Admin</h1>
+    <div class="flex flex-wrap justify-between items-center gap-3 bg-mediko-ink rounded-xl shadow px-5 py-4 mb-5">
+      <div class="flex items-center gap-3">
+        <img src="/admin-dashboard/mediko-logo-white.svg" alt="Mediko.ph" class="h-7 w-auto" />
+        <span class="border-l border-white/25 pl-3 text-xs font-semibold uppercase tracking-wider text-white/70">Admin</span>
+      </div>
       <div class="flex gap-2">
         <button onclick="refreshActiveTab()"
-          class="bg-blue-600 text-white px-4 py-2 rounded shadow hover:bg-blue-700 text-sm">Refresh</button>
+          class="bg-mediko-blue text-white px-4 py-2 rounded shadow hover:brightness-110 text-sm">Refresh</button>
         <button onclick="doLogout()"
-          class="bg-gray-200 text-gray-700 px-4 py-2 rounded shadow hover:bg-gray-300 text-sm">Logout</button>
+          class="bg-white/10 text-white px-4 py-2 rounded hover:bg-white/20 text-sm">Logout</button>
       </div>
     </div>
 
@@ -89,7 +110,7 @@
         </div>
       </div>
       <div id="page-applications" class="text-sm text-gray-500 mb-3 hidden"></div>
-      <div class="bg-white shadow rounded-lg overflow-hidden">
+      <div class="bg-white shadow rounded-lg overflow-x-auto">
         <table class="min-w-full divide-y divide-gray-200">
           <thead class="bg-gray-100">
             <tr>
@@ -134,7 +155,7 @@
         </div>
       </div>
       <div id="page-contact" class="text-sm text-gray-500 mb-3 hidden"></div>
-      <div class="bg-white shadow rounded-lg overflow-hidden">
+      <div class="bg-white shadow rounded-lg overflow-x-auto">
         <table class="min-w-full divide-y divide-gray-200">
           <thead class="bg-gray-100">
             <tr>
@@ -177,7 +198,7 @@
         </div>
       </div>
       <div id="page-returns" class="text-sm text-gray-500 mb-3 hidden"></div>
-      <div class="bg-white shadow rounded-lg overflow-hidden">
+      <div class="bg-white shadow rounded-lg overflow-x-auto">
         <table class="min-w-full divide-y divide-gray-200">
           <thead class="bg-gray-100">
             <tr>
