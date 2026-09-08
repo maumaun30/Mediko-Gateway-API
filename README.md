@@ -89,7 +89,8 @@ the time trap and the per-email cooldown. **Never set this in production.**
 | Variable | Notes |
 |---|---|
 | `SHOPIFY_SHOP_DOMAIN` | e.g. `fic0hr-kz.myshopify.com` |
-| `SHOPIFY_ADMIN_TOKEN` | Admin API access token (`shpat_…`) |
+| `SHOPIFY_CLIENT_ID` `SHOPIFY_CLIENT_SECRET` | App credentials. The gateway mints its own token from these and refreshes it before expiry — preferred, since scope changes then need no `.env` edit |
+| `SHOPIFY_ADMIN_TOKEN` | A long-lived install token. **Wins over the client credentials when set.** Never put a client-credentials token here — see [Operational notes](#operational-notes) |
 | `SHOPIFY_API_VERSION` | Defaults to `2026-04` |
 | `DISCOUNT_PERCENTAGE` | Percentage off, defaults to `20` |
 | `DISCOUNT_AUTOGEN_ENABLED` | Set to `false` to approve applications without issuing a code. Approval still succeeds; the row keeps no code and no approval email goes out |
@@ -204,6 +205,22 @@ so scope changes go through `shopify app deploy`, not the dashboard UI.
 `read_all_orders`, which requires Shopify approval and is deliberately not
 declared.
 
+### Authentication
+
+Two ways to authenticate, checked in this order:
+
+1. **`SHOPIFY_ADMIN_TOKEN`** — used directly if set
+2. **`SHOPIFY_CLIENT_ID` + `SHOPIFY_CLIENT_SECRET`** — the gateway mints a token
+   through the client credentials grant, caches it, and refreshes 5 minutes
+   before expiry. Concurrent callers share one mint rather than stampeding the
+   token endpoint. If Shopify rejects a minted token with a 401, it is discarded
+   and re-minted once before the request fails.
+
+Prefer the second. Scope changes then take effect without editing `.env`.
+
+`GET /api/shopify/scopes` reports what the live token actually carries — the
+quickest way to tell a stale token apart from an unreleased app version.
+
 ### Approval flow
 
 Moving an application to `approved` via `PATCH /api/submissions/:id/status`:
@@ -269,6 +286,12 @@ hardcoded secret when the variable is unset. Production must set it.
 `POST /api/auth/shopify` accepts any payload whose `shopOrigin` ends in
 `.myshopify.com` with a truthy `sessionToken`. Trust comes from the App Bridge
 frame, CORS and the `frame-ancestors` CSP — not from the token itself.
+
+**A client-credentials token does not belong in `SHOPIFY_ADMIN_TOKEN`.** Those
+expire after 24 hours. Pasting one there produces a service that works for a day
+and then fails — set `SHOPIFY_CLIENT_ID` and `SHOPIFY_CLIENT_SECRET` instead and
+let the gateway refresh it. `SHOPIFY_ADMIN_TOKEN` is only for a long-lived
+install token.
 
 **Never return 502.** Cloudflare fronts this app and replaces the body of an
 origin 502 with its own HTML error page, so the JSON never reaches the client.
