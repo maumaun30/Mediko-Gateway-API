@@ -415,6 +415,8 @@ async function sendApplicationEmails(application, reqFiles, metadataStr) {
 }
 
 // ── Shopify Admin API ─────────────────────────────────────────────────────────
+// Upstream failures here answer 500, not 502: Cloudflare fronts this app and
+// replaces a 502 body with its own HTML error page, so the JSON never lands.
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2026-04";
 const DISCOUNT_PERCENTAGE = parseFloat(process.env.DISCOUNT_PERCENTAGE || "20");
 const DISCOUNT_AUTOGEN_ENABLED = process.env.DISCOUNT_AUTOGEN_ENABLED !== "false";
@@ -1576,7 +1578,7 @@ app.patch("/api/submissions/:id/status", async (req, res) => {
       status,
       message: err.message,
     });
-    res.status(502).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -1650,7 +1652,7 @@ app.get("/api/submissions/:id/orders", requireAdmin, async (req, res) => {
     res.json({ email: rows[0].email_address, orders });
   } catch (err) {
     log("error", "order_list_failed", { id, message: err.message });
-    res.status(502).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -1717,7 +1719,7 @@ app.post("/api/submissions/:id/assign-order", requireAdmin, async (req, res) => 
     res.json({ success: true, id, order_gid: orderGid, order_name: orderName, tag });
   } catch (err) {
     log("error", "order_assign_failed", { id, orderGid, tag, message: err.message });
-    res.status(502).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -1756,7 +1758,7 @@ app.delete("/api/submissions/:id/assign-order", requireAdmin, async (req, res) =
     res.json({ success: true, id });
   } catch (err) {
     log("error", "order_unassign_failed", { id, message: err.message });
-    res.status(502).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
