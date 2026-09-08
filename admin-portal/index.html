@@ -316,6 +316,20 @@
       },
     };
 
+    // Reads a response as JSON, but surfaces what actually came back when it
+    // isn't JSON — proxy and gateway error pages are HTML, and parsing those
+    // blind turns every infrastructure failure into "Unexpected token '<'".
+    async function readJson(res) {
+      const text = await res.text();
+      try {
+        return JSON.parse(text);
+      } catch {
+        const snippet = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+        const status = `HTTP ${res.status}${res.statusText ? ' ' + res.statusText : ''}`;
+        throw new Error(`${status} — server returned a non-JSON response${snippet ? `: ${snippet}` : ''}`);
+      }
+    }
+
     // ── Auth ──────────────────────────────────────────────────────────────────
 
     async function doLogin() {
@@ -331,7 +345,7 @@
           body: JSON.stringify({password: pw})
         });
         if (!res.ok) {errEl.classList.remove('hidden'); return;}
-        const data = await res.json();
+        const data = await readJson(res);
         dashboardToken = data.token;
         sessionStorage.setItem(TOKEN_KEY, dashboardToken);
         showDashboard();
@@ -366,7 +380,7 @@
           body: JSON.stringify({shopOrigin, sessionToken})
         });
         if (!res.ok) return false;
-        const data = await res.json();
+        const data = await readJson(res);
         dashboardToken = data.token;
         sessionStorage.setItem(TOKEN_KEY, dashboardToken);
         return true;
@@ -441,7 +455,7 @@
 
         if (res.status === 401) {doLogout(); return;}
 
-        const json = await res.json();
+        const json = await readJson(res);
         if (!res.ok) throw new Error(json.error || `Server error ${res.status}`);
 
         tab.page = json.metadata.current_page;
@@ -550,7 +564,7 @@
           body: JSON.stringify({status})
         });
         if (res.status === 401) {doLogout(); return;}
-        const json = await res.json();
+        const json = await readJson(res);
         if (!res.ok) throw new Error(json.error || `Server error ${res.status}`);
         loadTab(name);
       } catch (e) {
@@ -717,7 +731,7 @@
           headers: {'Authorization': `Bearer ${dashboardToken}`}
         });
         if (res.status === 401) {closeAssignModal(); doLogout(); return;}
-        const json = await res.json();
+        const json = await readJson(res);
         if (!res.ok) throw new Error(json.error || `Server error ${res.status}`);
 
         if (!json.orders.length) {
@@ -764,7 +778,7 @@
           body: JSON.stringify({order_gid: orderGid, order_name: orderName, tag})
         });
         if (res.status === 401) {closeAssignModal(); doLogout(); return;}
-        const json = await res.json();
+        const json = await readJson(res);
         if (!res.ok) throw new Error(json.error || `Server error ${res.status}`);
         closeAssignModal();
         loadTab('applications');
@@ -785,7 +799,7 @@
           headers: {'Authorization': `Bearer ${dashboardToken}`}
         });
         if (res.status === 401) {doLogout(); return;}
-        const json = await res.json();
+        const json = await readJson(res);
         if (!res.ok) throw new Error(json.error || `Server error ${res.status}`);
         loadTab('applications');
       } catch (e) {
@@ -863,7 +877,7 @@
           body: JSON.stringify({status: 'rejected', reason})
         });
         if (res.status === 401) {doLogout(); return;}
-        const json = await res.json();
+        const json = await readJson(res);
         if (!res.ok) throw new Error(json.error || `Server error ${res.status}`);
         closeRejectModal();
         loadTab(_rejectTab);
@@ -883,7 +897,7 @@
         const res = await fetch(`${GATEWAY_URL}/api/submissions/${id}/discount-usage`, {
           headers: { 'Authorization': `Bearer ${dashboardToken}` }
         });
-        const json = await res.json();
+        const json = await readJson(res);
         const el = document.getElementById(`usage-${id}`);
         if (json.used) {
           el.textContent = '✓ Used';

@@ -51,7 +51,7 @@ app.use(
         callback(new Error("Not allowed by CORS Policy"));
       }
     },
-    methods: ["GET", "POST", "PATCH", "OPTIONS"],
+    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "x-api-key", "Authorization"],
     optionsSuccessStatus: 200,
   }),
