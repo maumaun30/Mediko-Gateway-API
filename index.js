@@ -565,7 +565,22 @@ async function deleteDiscount(nodeGid) {
 // ── Shopify order tagging (Senior/PWD) ────────────────────────────────────────
 const ORDER_TAGS = ["PWD", "SC"];
 
-async function listOrdersForEmail(email) {
+// Search terms are interpolated into a Shopify query string, where a quote or
+// backslash would break out of it. Neither carries meaning in a search, so drop
+// them rather than escaping.
+function sanitizeSearchTerm(term) {
+  return String(term).replace(/["\\]/g, " ").trim();
+}
+
+// Without a search term, lists the applicant's own orders by email. With one,
+// hands it to Shopify's default order search, which spans order name, email
+// and customer name — an applicant's discount may sit on an order placed under
+// someone else's address.
+async function listOrders({ email, search }) {
+  const term =
+    typeof search === "string" ? sanitizeSearchTerm(search).slice(0, 100) : "";
+  const q = term ? term : `email:"${sanitizeSearchTerm(email)}"`;
+
   const data = await shopifyGraphQL(
     `query customerOrders($q: String!) {
        orders(first: 20, query: $q, sortKey: CREATED_AT, reverse: true) {
@@ -573,20 +588,24 @@ async function listOrdersForEmail(email) {
            node {
              id
              name
+             email
              createdAt
              tags
              displayFinancialStatus
+             customer { displayName }
              currentTotalPriceSet { shopMoney { amount currencyCode } }
            }
          }
        }
      }`,
-    { q: `email:"${email}"` },
+    { q },
   );
 
   return (data?.orders?.edges || []).map(({ node }) => ({
     gid: node.id,
     name: node.name,
+    email: node.email || null,
+    customer_name: node.customer?.displayName || null,
     created_at: node.createdAt,
     tags: node.tags || [],
     financial_status: node.displayFinancialStatus,
@@ -1666,7 +1685,8 @@ app.get("/api/shopify/scopes", requireAdmin, async (req, res) => {
 });
 
 // ── GET /api/submissions/:id/orders ───────────────────────────────────────────
-// Recent Shopify orders for the applicant's email, for the assign-order picker.
+// Orders for the assign-order picker. Defaults to the applicant's own orders;
+// ?q= searches all orders instead, for a discount used on someone else's order.
 app.get("/api/submissions/:id/orders", requireAdmin, async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (!Number.isInteger(id) || id < 1) {
@@ -1686,8 +1706,11 @@ app.get("/api/submissions/:id/orders", requireAdmin, async (req, res) => {
     );
     if (!rows.length) return res.status(404).json({ error: "Not found" });
 
-    const orders = await listOrdersForEmail(rows[0].email_address);
-    res.json({ email: rows[0].email_address, orders });
+    const email = rows[0].email_address;
+    const search = typeof req.query.q === "string" ? req.query.q : "";
+    const orders = await listOrders({ email, search });
+
+    res.json({ email, search: search.trim(), orders });
   } catch (err) {
     log("error", "order_list_failed", { id, message: err.message });
     res.status(500).json({ error: err.message });

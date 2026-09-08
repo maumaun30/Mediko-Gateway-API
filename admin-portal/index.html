@@ -254,11 +254,21 @@
         Pick one of this applicant&#39;s recent Shopify orders. The order will be tagged in Shopify.
       </p>
 
+      <label class="block text-xs font-medium text-gray-600 mb-1">Find another order</label>
+      <input id="assign-order-search" type="text" placeholder="Order number, customer name, or email"
+        oninput="onAssignSearchInput(this.value)"
+        class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-mediko-blue" />
+      <p class="text-xs text-gray-500 mt-1 mb-3">
+        Leave blank to see the applicant&#39;s own orders. Search when the discount was used
+        on an order placed under a different email.
+      </p>
+
       <label class="block text-xs font-medium text-gray-600 mb-1">Order</label>
       <select id="assign-order-select" disabled
-        class="w-full border border-gray-300 rounded px-3 py-2 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-blue-400">
+        class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-mediko-blue">
         <option>Loading…</option>
       </select>
+      <p id="assign-order-context" class="text-xs text-gray-500 mt-1 mb-4"></p>
 
       <label class="block text-xs font-medium text-gray-600 mb-1">Tag</label>
       <div class="flex gap-6 mb-1">
@@ -712,45 +722,88 @@
 
     function closeAssignModal() {
       document.getElementById('assign-order-modal').classList.add('hidden');
+      clearTimeout(_assignSearchTimer);
+      _assignLoadSeq++;
       _assignId = null;
     }
 
-    async function promptAssignOrder(id, currentTag) {
-      _assignId = id;
+    // Only the newest load may paint the dropdown — a slow earlier request must
+    // not overwrite results the user has since typed their way to.
+    let _assignLoadSeq = 0;
+
+    async function loadAssignOrders(search) {
+      const id = _assignId;
+      const seq = ++_assignLoadSeq;
       const sel = document.getElementById('assign-order-select');
+      const ctx = document.getElementById('assign-order-context');
+
       document.getElementById('assign-error').classList.add('hidden');
       sel.disabled = true;
       sel.innerHTML = '<option>Loading…</option>';
-      document.querySelectorAll('input[name="assign-tag"]').forEach(r => {
-        r.checked = r.value === (currentTag || 'PWD');
-      });
-      document.getElementById('assign-order-modal').classList.remove('hidden');
+      ctx.textContent = '';
+
+      const term = (search || '').trim();
+      const url = `${GATEWAY_URL}/api/submissions/${id}/orders`
+        + (term ? `?q=${encodeURIComponent(term)}` : '');
 
       try {
-        const res = await fetch(`${GATEWAY_URL}/api/submissions/${id}/orders`, {
+        const res = await fetch(url, {
           headers: {'Authorization': `Bearer ${dashboardToken}`}
         });
+        if (seq !== _assignLoadSeq) return;
         if (res.status === 401) {closeAssignModal(); doLogout(); return;}
         const json = await readJson(res);
         if (!res.ok) throw new Error(json.error || `Server error ${res.status}`);
 
+        const scope = term
+          ? `Search results for “${escHtml(term)}”`
+          : `Orders for ${escHtml(json.email)}`;
+
         if (!json.orders.length) {
-          sel.innerHTML = `<option value="">No orders found for ${escHtml(json.email)}</option>`;
+          sel.innerHTML = '<option value="">No matching orders</option>';
+          ctx.innerHTML = `${scope} — nothing found. Only orders from the last 60 days are visible.`;
           return;
         }
 
         sel.innerHTML = json.orders.map(o => {
-          const total = o.total ? ` · ${o.total} ${o.currency || ''}`.trim() : '';
+          const total = o.total ? ` · ${`${o.total} ${o.currency || ''}`.trim()}` : '';
+          const who = o.email || o.customer_name;
+          const owner = who ? ` · ${who}` : '';
           const tags = o.tags && o.tags.length ? ` · ${o.tags.join(', ')}` : '';
-          const label = `${o.name} · ${formatDate(o.created_at)}${total}${tags}`;
+          const label = `${o.name} · ${formatDate(o.created_at)}${total}${owner}${tags}`;
           return `<option value="${escHtml(o.gid)}" data-name="${escHtml(o.name)}">${escHtml(label)}</option>`;
         }).join('');
         sel.disabled = false;
+        ctx.innerHTML = `${scope} — ${json.orders.length} shown, newest first.`;
       } catch (e) {
-        console.error('promptAssignOrder error:', e);
+        if (seq !== _assignLoadSeq) return;
+        console.error('loadAssignOrders error:', e);
         sel.innerHTML = '<option value="">Could not load orders</option>';
         showAssignError(e.message);
       }
+    }
+
+    let _assignSearchTimer = null;
+
+    function onAssignSearchInput(value) {
+      clearTimeout(_assignSearchTimer);
+      const term = value.trim();
+      // Below two characters a search matches most of the catalogue, so fall
+      // back to the applicant's own orders instead.
+      _assignSearchTimer = setTimeout(() => {
+        loadAssignOrders(term.length >= 2 ? term : '');
+      }, 300);
+    }
+
+    function promptAssignOrder(id, currentTag) {
+      _assignId = id;
+      const search = document.getElementById('assign-order-search');
+      search.value = '';
+      document.querySelectorAll('input[name="assign-tag"]').forEach(r => {
+        r.checked = r.value === (currentTag || 'PWD');
+      });
+      document.getElementById('assign-order-modal').classList.remove('hidden');
+      loadAssignOrders('');
     }
 
     async function confirmAssignOrder() {
