@@ -1627,6 +1627,44 @@ app.get("/api/submissions/:id/discount-usage", requireAdmin, async (req, res) =>
   }
 });
 
+// ── GET /api/shopify/scopes ───────────────────────────────────────────────────
+// Diagnostic: reports the scopes the configured Admin token actually carries.
+// A token keeps the grant it was minted with, so this is the way to tell an
+// out-of-date token apart from an app whose scopes were never updated.
+app.get("/api/shopify/scopes", requireAdmin, async (req, res) => {
+  if (!shopifyConfigured()) {
+    return res.status(503).json({
+      error:
+        "Shopify is not configured. Set SHOPIFY_SHOP_DOMAIN and SHOPIFY_ADMIN_TOKEN.",
+    });
+  }
+
+  try {
+    const data = await shopifyGraphQL(
+      `query appScopes {
+         currentAppInstallation {
+           accessScopes { handle }
+         }
+       }`,
+    );
+
+    const granted = (data?.currentAppInstallation?.accessScopes || []).map(
+      (s) => s.handle,
+    );
+
+    res.json({
+      shop: process.env.SHOPIFY_SHOP_DOMAIN,
+      api_version: SHOPIFY_API_VERSION,
+      granted,
+      has_read_orders: granted.includes("read_orders"),
+      has_write_orders: granted.includes("write_orders"),
+    });
+  } catch (err) {
+    log("error", "scope_check_failed", { message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── GET /api/submissions/:id/orders ───────────────────────────────────────────
 // Recent Shopify orders for the applicant's email, for the assign-order picker.
 app.get("/api/submissions/:id/orders", requireAdmin, async (req, res) => {
