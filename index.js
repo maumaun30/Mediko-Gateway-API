@@ -228,6 +228,9 @@ function ensureStatusColumn() {
   ensureColumn("assigned_order_gid", "VARCHAR(255) NULL");
   ensureColumn("assigned_order_name", "VARCHAR(64) NULL");
   ensureColumn("assigned_tag", "VARCHAR(8) NULL");
+  ensureColumn("assigned_customer_gid", "VARCHAR(255) NULL");
+  ensureColumn("refunded_at", "DATETIME NULL");
+  ensureColumn("refunded_by", "VARCHAR(120) NULL");
   // ensureColumnFor("return_requests", "rejection_reason", "TEXT NULL");
 }
 
@@ -296,7 +299,7 @@ function requireAdmin(req, res, next) {
     const token = authHeader.split(" ")[1];
     const secret =
       process.env.DASHBOARD_JWT_SECRET || "mediko-dashboard-secret-2026";
-    jwt.verify(token, secret);
+    req.admin = jwt.verify(token, secret);
     next();
   } catch {
     return res.status(401).json({ error: "Invalid or expired token" });
@@ -652,6 +655,9 @@ async function deleteDiscount(nodeGid) {
 
 // ── Shopify order tagging (Senior/PWD) ────────────────────────────────────────
 const ORDER_TAGS = ["PWD", "SC"];
+// Refunds are a second, independent axis: an order stays PWD or SC and gains
+// this tag once management has processed the refund by hand in Shopify.
+const REFUND_TAG = "REFUNDED";
 
 // Search terms are interpolated into a Shopify query string, where a quote or
 // backslash would break out of it. Neither carries meaning in a search, so drop
@@ -680,7 +686,7 @@ async function listOrders({ email, search }) {
              createdAt
              tags
              displayFinancialStatus
-             customer { displayName }
+             customer { id displayName }
              currentTotalPriceSet { shopMoney { amount currencyCode } }
            }
          }
@@ -693,6 +699,7 @@ async function listOrders({ email, search }) {
     gid: node.id,
     name: node.name,
     email: node.email || null,
+    customer_gid: node.customer?.id || null,
     customer_name: node.customer?.displayName || null,
     created_at: node.createdAt,
     tags: node.tags || [],
@@ -702,7 +709,7 @@ async function listOrders({ email, search }) {
   }));
 }
 
-async function addOrderTag(orderGid, tag) {
+async function addShopifyTag(gid, tag) {
   const data = await shopifyGraphQL(
     `mutation addTags($id: ID!, $tags: [String!]!) {
        tagsAdd(id: $id, tags: $tags) {
@@ -710,12 +717,12 @@ async function addOrderTag(orderGid, tag) {
          userErrors { field message }
        }
      }`,
-    { id: orderGid, tags: [tag] },
+    { id: gid, tags: [tag] },
   );
   throwIfUserErrors(data?.tagsAdd?.userErrors, "tagsAdd");
 }
 
-async function removeOrderTag(orderGid, tag) {
+async function removeShopifyTag(gid, tag) {
   const data = await shopifyGraphQL(
     `mutation removeTags($id: ID!, $tags: [String!]!) {
        tagsRemove(id: $id, tags: $tags) {
@@ -723,9 +730,30 @@ async function removeOrderTag(orderGid, tag) {
          userErrors { field message }
        }
      }`,
-    { id: orderGid, tags: [tag] },
+    { id: gid, tags: [tag] },
   );
   throwIfUserErrors(data?.tagsRemove?.userErrors, "tagsRemove");
+}
+
+// One Shopify customer can back several applications (a household sharing an
+// email, a re-application). Only strip their tag once no other row still needs
+// it, otherwise unassigning one application silently downgrades the others.
+async function untagCustomerIfUnused(id, customerGid, tag) {
+  if (!customerGid || !tag) return;
+  try {
+    const rows = await queryAsync(
+      `SELECT COUNT(*) AS c FROM applications
+        WHERE assigned_customer_gid = ? AND assigned_tag = ? AND id <> ?`,
+      [customerGid, tag, id],
+    );
+    if (rows[0].c > 0) {
+      log("info", "customer_untag_skipped", { id, customerGid, tag, others: rows[0].c });
+      return;
+    }
+    await removeShopifyTag(customerGid, tag);
+  } catch (e) {
+    log("warn", "customer_untag_failed", { id, customerGid, tag, message: e.message });
+  }
 }
 
 // ── Approval email ────────────────────────────────────────────────────────────
@@ -1812,13 +1840,28 @@ app.get("/api/submissions/:id/orders", requireAdmin, async (req, res) => {
 // Assigns one Shopify order to an application and tags it PWD or SC.
 app.post("/api/submissions/:id/assign-order", requireAdmin, async (req, res) => {
   const id = parseInt(req.params.id, 10);
-  const { order_gid: orderGid, order_name: orderName, tag } = req.body || {};
+  const {
+    order_gid: orderGid,
+    order_name: orderName,
+    customer_gid: rawCustomerGid,
+    tag,
+  } = req.body || {};
 
   if (!Number.isInteger(id) || id < 1) {
     return res.status(400).json({ error: "Invalid id" });
   }
   if (typeof orderGid !== "string" || !orderGid.startsWith("gid://shopify/Order/")) {
     return res.status(400).json({ error: "Invalid order_gid" });
+  }
+  // Guest checkouts have no customer — the order still gets tagged, the
+  // customer half is simply skipped.
+  const customerGid =
+    typeof rawCustomerGid === "string"
+      && rawCustomerGid.startsWith("gid://shopify/Customer/")
+      ? rawCustomerGid
+      : null;
+  if (rawCustomerGid && !customerGid) {
+    return res.status(400).json({ error: "Invalid customer_gid" });
   }
   if (!ORDER_TAGS.includes(tag)) {
     return res.status(400).json({ error: `Tag must be one of: ${ORDER_TAGS.join(", ")}` });
@@ -1833,7 +1876,8 @@ app.post("/api/submissions/:id/assign-order", requireAdmin, async (req, res) => 
 
   try {
     const rows = await queryAsync(
-      "SELECT assigned_order_gid, assigned_tag FROM applications WHERE id = ?",
+      `SELECT assigned_order_gid, assigned_customer_gid, assigned_tag, refunded_at
+         FROM applications WHERE id = ?`,
       [id],
     );
     if (!rows.length) return res.status(404).json({ error: "Not found" });
@@ -1848,7 +1892,7 @@ app.post("/api/submissions/:id/assign-order", requireAdmin, async (req, res) => 
 
     if ((movedOrder || changedTag) && prev.assigned_tag) {
       try {
-        await removeOrderTag(prev.assigned_order_gid, prev.assigned_tag);
+        await removeShopifyTag(prev.assigned_order_gid, prev.assigned_tag);
       } catch (e) {
         log("warn", "order_untag_failed", {
           id,
@@ -1857,19 +1901,68 @@ app.post("/api/submissions/:id/assign-order", requireAdmin, async (req, res) => 
           message: e.message,
         });
       }
+      await untagCustomerIfUnused(id, prev.assigned_customer_gid, prev.assigned_tag);
     }
 
-    await addOrderTag(orderGid, tag);
+    // A refund marker belongs to the order it was made against; moving to a
+    // different order drops it.
+    if (movedOrder && prev.refunded_at) {
+      try {
+        await removeShopifyTag(prev.assigned_order_gid, REFUND_TAG);
+      } catch (e) {
+        log("warn", "order_untag_failed", {
+          id,
+          orderGid: prev.assigned_order_gid,
+          tag: REFUND_TAG,
+          message: e.message,
+        });
+      }
+    }
+
+    await addShopifyTag(orderGid, tag);
+
+    // The order tag is the record of truth; a failure to mirror it onto the
+    // customer must not undo it.
+    if (customerGid) {
+      try {
+        await addShopifyTag(customerGid, tag);
+      } catch (e) {
+        log("warn", "customer_tag_failed", { id, customerGid, tag, message: e.message });
+      }
+    } else {
+      log("info", "customer_tag_skipped", { id, orderGid, tag });
+    }
 
     await queryAsync(
       `UPDATE applications
-         SET assigned_order_gid = ?, assigned_order_name = ?, assigned_tag = ?
+         SET assigned_order_gid = ?, assigned_order_name = ?, assigned_customer_gid = ?,
+             assigned_tag = ?
          WHERE id = ?`,
-      [orderGid, typeof orderName === "string" ? orderName.slice(0, 64) : null, tag, id],
+      [
+        orderGid,
+        typeof orderName === "string" ? orderName.slice(0, 64) : null,
+        customerGid,
+        tag,
+        id,
+      ],
     );
 
-    log("info", "order_assigned", { id, orderGid, tag, ip: req.ip });
-    res.json({ success: true, id, order_gid: orderGid, order_name: orderName, tag });
+    if (movedOrder) {
+      await queryAsync(
+        "UPDATE applications SET refunded_at = NULL, refunded_by = NULL WHERE id = ?",
+        [id],
+      );
+    }
+
+    log("info", "order_assigned", { id, orderGid, customerGid, tag, ip: req.ip });
+    res.json({
+      success: true,
+      id,
+      order_gid: orderGid,
+      order_name: orderName,
+      customer_gid: customerGid,
+      tag,
+    });
   } catch (err) {
     log("error", "order_assign_failed", { id, orderGid, tag, message: err.message });
     res.status(500).json({ error: err.message });
@@ -1885,24 +1978,47 @@ app.delete("/api/submissions/:id/assign-order", requireAdmin, async (req, res) =
 
   try {
     const rows = await queryAsync(
-      "SELECT assigned_order_gid, assigned_tag FROM applications WHERE id = ?",
+      `SELECT assigned_order_gid, assigned_customer_gid, assigned_tag, refunded_at
+         FROM applications WHERE id = ?`,
       [id],
     );
     if (!rows.length) return res.status(404).json({ error: "Not found" });
 
-    const { assigned_order_gid: orderGid, assigned_tag: tag } = rows[0];
+    const {
+      assigned_order_gid: orderGid,
+      assigned_customer_gid: customerGid,
+      assigned_tag: tag,
+      refunded_at: refundedAt,
+    } = rows[0];
 
     if (orderGid && tag && shopifyConfigured()) {
       try {
-        await removeOrderTag(orderGid, tag);
+        await removeShopifyTag(orderGid, tag);
       } catch (e) {
         log("warn", "order_untag_failed", { id, orderGid, tag, message: e.message });
+      }
+      await untagCustomerIfUnused(id, customerGid, tag);
+    }
+
+    // Don't leave a REFUNDED tag on an order this application no longer claims.
+    if (orderGid && refundedAt && shopifyConfigured()) {
+      try {
+        await removeShopifyTag(orderGid, REFUND_TAG);
+      } catch (e) {
+        log("warn", "order_untag_failed", {
+          id,
+          orderGid,
+          tag: REFUND_TAG,
+          message: e.message,
+        });
       }
     }
 
     await queryAsync(
       `UPDATE applications
-         SET assigned_order_gid = NULL, assigned_order_name = NULL, assigned_tag = NULL
+         SET assigned_order_gid = NULL, assigned_order_name = NULL,
+             assigned_customer_gid = NULL, assigned_tag = NULL,
+             refunded_at = NULL, refunded_by = NULL
          WHERE id = ?`,
       [id],
     );
@@ -1911,6 +2027,93 @@ app.delete("/api/submissions/:id/assign-order", requireAdmin, async (req, res) =
     res.json({ success: true, id });
   } catch (err) {
     log("error", "order_unassign_failed", { id, message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/submissions/:id/refund ──────────────────────────────────────────
+// Marks the assigned order as refunded. Management still issues the refund by
+// hand in Shopify — this only records that they did, on the order and locally.
+app.post("/api/submissions/:id/refund", requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: "Invalid id" });
+  }
+  if (!shopifyConfigured()) {
+    return res.status(503).json({ error: "Shopify is not configured." });
+  }
+
+  try {
+    const rows = await queryAsync(
+      "SELECT assigned_order_gid, refunded_at FROM applications WHERE id = ?",
+      [id],
+    );
+    if (!rows.length) return res.status(404).json({ error: "Not found" });
+
+    const { assigned_order_gid: orderGid, refunded_at: refundedAt } = rows[0];
+    if (!orderGid) {
+      return res
+        .status(409)
+        .json({ error: "Assign an order before marking it refunded" });
+    }
+    if (refundedAt) {
+      return res.json({ success: true, id, refunded_at: refundedAt });
+    }
+
+    await addShopifyTag(orderGid, REFUND_TAG);
+
+    const by = req.admin?.shopOrigin || "admin";
+    await queryAsync(
+      "UPDATE applications SET refunded_at = NOW(), refunded_by = ? WHERE id = ?",
+      [by.slice(0, 120), id],
+    );
+
+    log("info", "order_refund_marked", { id, orderGid, by, ip: req.ip });
+    res.json({ success: true, id, refunded_by: by });
+  } catch (err) {
+    log("error", "order_refund_failed", { id, message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── DELETE /api/submissions/:id/refund ────────────────────────────────────────
+app.delete("/api/submissions/:id/refund", requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: "Invalid id" });
+  }
+
+  try {
+    const rows = await queryAsync(
+      "SELECT assigned_order_gid FROM applications WHERE id = ?",
+      [id],
+    );
+    if (!rows.length) return res.status(404).json({ error: "Not found" });
+
+    const { assigned_order_gid: orderGid } = rows[0];
+
+    if (orderGid && shopifyConfigured()) {
+      try {
+        await removeShopifyTag(orderGid, REFUND_TAG);
+      } catch (e) {
+        log("warn", "order_untag_failed", {
+          id,
+          orderGid,
+          tag: REFUND_TAG,
+          message: e.message,
+        });
+      }
+    }
+
+    await queryAsync(
+      "UPDATE applications SET refunded_at = NULL, refunded_by = NULL WHERE id = ?",
+      [id],
+    );
+
+    log("info", "order_refund_cleared", { id, orderGid, ip: req.ip });
+    res.json({ success: true, id });
+  } catch (err) {
+    log("error", "order_refund_clear_failed", { id, message: err.message });
     res.status(500).json({ error: err.message });
   }
 });

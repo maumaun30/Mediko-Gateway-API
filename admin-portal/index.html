@@ -692,6 +692,7 @@
     const TAG_STYLES = {
       PWD: 'bg-purple-100 text-purple-800',
       SC: 'bg-amber-100 text-amber-800',
+      REFUNDED: 'bg-rose-100 text-rose-800',
     };
 
     function orderCell(app) {
@@ -701,12 +702,26 @@
       }
       const tag = app.assigned_tag || '';
       const tagCls = TAG_STYLES[tag] || 'bg-gray-100 text-gray-700';
+      const refunded = !!app.refunded_at;
+      const refundBadge = refunded
+        ? `<span class="inline-block mt-1 px-2 py-0.5 rounded text-xs font-semibold ${TAG_STYLES.REFUNDED}"
+             title="Refunded ${escHtml(formatDate(app.refunded_at))}${app.refunded_by ? ` by ${escHtml(app.refunded_by)}` : ''}">REFUNDED</span>`
+        : '';
+      const refundBtn = refunded
+        ? `<button onclick="clearRefund(${app.id})"
+             class="px-2 py-1 bg-gray-200 text-gray-700 rounded text-xs hover:bg-gray-300">Undo refund</button>`
+        : `<button onclick="markRefunded(${app.id})"
+             class="px-2 py-1 bg-rose-600 text-white rounded text-xs hover:bg-rose-700">Mark refunded</button>`;
       return `
       <div class="text-xs font-mono text-gray-800">${escHtml(app.assigned_order_name || 'Order')}</div>
-      <span class="inline-block mt-1 px-2 py-0.5 rounded text-xs font-semibold ${tagCls}">${escHtml(tag)}</span>
-      <div class="flex gap-1 mt-2">
+      <div class="flex gap-1 flex-wrap">
+        <span class="inline-block mt-1 px-2 py-0.5 rounded text-xs font-semibold ${tagCls}">${escHtml(tag)}</span>
+        ${refundBadge}
+      </div>
+      <div class="flex gap-1 flex-wrap mt-2">
         <button onclick="promptAssignOrder(${app.id}, '${escHtml(tag)}')"
           class="px-2 py-1 bg-gray-200 text-gray-700 rounded text-xs hover:bg-gray-300">Change</button>
+        ${refundBtn}
         <button onclick="unassignOrder(${app.id})"
           class="px-2 py-1 bg-red-100 text-red-700 rounded text-xs hover:bg-red-200">Unassign</button>
       </div>`;
@@ -771,7 +786,8 @@
           const owner = who ? ` · ${who}` : '';
           const tags = o.tags && o.tags.length ? ` · ${o.tags.join(', ')}` : '';
           const label = `${o.name} · ${formatDate(o.created_at)}${total}${owner}${tags}`;
-          return `<option value="${escHtml(o.gid)}" data-name="${escHtml(o.name)}">${escHtml(label)}</option>`;
+          return `<option value="${escHtml(o.gid)}" data-name="${escHtml(o.name)}"
+            data-customer="${escHtml(o.customer_gid || '')}">${escHtml(label)}</option>`;
         }).join('');
         sel.disabled = false;
         ctx.innerHTML = `${scope} — ${json.orders.length} shown, newest first.`;
@@ -810,6 +826,7 @@
       const sel = document.getElementById('assign-order-select');
       const orderGid = sel.value;
       const orderName = sel.selectedOptions[0]?.dataset.name || null;
+      const customerGid = sel.selectedOptions[0]?.dataset.customer || null;
       const tag = document.querySelector('input[name="assign-tag"]:checked')?.value;
 
       if (!orderGid) {showAssignError('Pick an order first.'); return;}
@@ -828,7 +845,12 @@
             'Authorization': `Bearer ${dashboardToken}`,
             'Content-Type': 'application/json'
           },
-          body: JSON.stringify({order_gid: orderGid, order_name: orderName, tag})
+          body: JSON.stringify({
+            order_gid: orderGid,
+            order_name: orderName,
+            customer_gid: customerGid || undefined,
+            tag,
+          })
         });
         if (res.status === 401) {closeAssignModal(); doLogout(); return;}
         const json = await readJson(res);
@@ -859,6 +881,32 @@
         console.error('unassignOrder error:', e);
         alert(`Failed to unassign order: ${e.message}`);
       }
+    }
+
+    async function refundRequest(id, method, failVerb) {
+      try {
+        const res = await fetch(`${GATEWAY_URL}/api/submissions/${id}/refund`, {
+          method,
+          headers: {'Authorization': `Bearer ${dashboardToken}`}
+        });
+        if (res.status === 401) {doLogout(); return;}
+        const json = await readJson(res);
+        if (!res.ok) throw new Error(json.error || `Server error ${res.status}`);
+        loadTab('applications');
+      } catch (e) {
+        console.error(`${failVerb} error:`, e);
+        alert(`Failed to ${failVerb}: ${e.message}`);
+      }
+    }
+
+    async function markRefunded(id) {
+      if (!confirm('Tag this order REFUNDED? Do the refund in Shopify first — this only records it.')) return;
+      await refundRequest(id, 'POST', 'mark refunded');
+    }
+
+    async function clearRefund(id) {
+      if (!confirm('Remove the REFUNDED tag from this order?')) return;
+      await refundRequest(id, 'DELETE', 'undo refund');
     }
 
     // ── Modal ─────────────────────────────────────────────────────────────────
