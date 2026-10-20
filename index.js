@@ -41,20 +41,24 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
   .map((o) => o.trim())
   .filter(Boolean);
 
-app.use(
-  cors({
-    origin(origin, callback) {
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        log("warn", "cors_blocked", { origin });
-        callback(new Error("Not allowed by CORS Policy"));
-      }
-    },
-    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "x-api-key", "Authorization"],
-    optionsSuccessStatus: 200,
-  }),
+const corsMiddleware = cors({
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      log("warn", "cors_blocked", { origin });
+      callback(new Error("Not allowed by CORS Policy"));
+    }
+  },
+  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "x-api-key", "Authorization"],
+  optionsSuccessStatus: 200,
+});
+
+// The unsubscribe page posts its form back to this host, which isn't in
+// ALLOWED_ORIGINS. That route is token-guarded and credential-free, so skip CORS.
+app.use((req, res, next) =>
+  req.path === "/api/unsubscribe" ? next() : corsMiddleware(req, res, next),
 );
 
 app.use(express.json({ limit: "1mb" }));
@@ -189,6 +193,7 @@ db.getConnection((err, conn) => {
     // ensureStatusColumn();
     ensureContactTable();
     ensureReturnsTable();
+    ensureBlastTables();
   }
 });
 
@@ -2361,6 +2366,556 @@ app.patch("/api/return-requests/:id/status", requireAdmin, async (req, res) => {
   } catch (err) {
     log("error", "return_status_update_failed", { id, message: err.message });
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Email blasts ──────────────────────────────────────────────────────────────
+// Admin-composed bulk email. One message per recipient (never BCC, so
+// addresses stay private), sent sequentially in the background with a small
+// delay so the Brevo relay isn't flooded. Every recipient is a row, so the
+// portal can show progress and a blast cut short by a restart can be resumed.
+const BLAST_SEND_DELAY_MS = Math.max(0, parseInt(process.env.BLAST_SEND_DELAY_MS, 10) || 300);
+const BLAST_MAX_RECIPIENTS = 5000;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+// Which statuses an admin may target per source table.
+const BLAST_SOURCES = {
+  applications: { table: "applications", statuses: ["pending", "approved", "rejected"] },
+  contact: { table: "contact_submissions", statuses: ["pending", "resolved"] },
+  returns: { table: "return_requests", statuses: ["pending", "approved", "rejected"] },
+};
+
+// blastId → { cancelled } for blasts this process is currently sending.
+const runningBlasts = new Map();
+
+async function ensureBlastTables() {
+  try {
+    await queryAsync(
+      `CREATE TABLE IF NOT EXISTS email_blasts (
+         id INT AUTO_INCREMENT PRIMARY KEY,
+         subject VARCHAR(255) NOT NULL,
+         body MEDIUMTEXT NOT NULL,
+         audience TEXT,
+         status ENUM('sending','completed','interrupted','cancelled') NOT NULL DEFAULT 'sending',
+         total INT NOT NULL DEFAULT 0,
+         created_by VARCHAR(120) NULL,
+         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+         finished_at DATETIME NULL,
+         INDEX idx_blasts_created (created_at)
+       )`,
+    );
+    await queryAsync(
+      `CREATE TABLE IF NOT EXISTS email_blast_recipients (
+         id INT AUTO_INCREMENT PRIMARY KEY,
+         blast_id INT NOT NULL,
+         email VARCHAR(255) NOT NULL,
+         full_name VARCHAR(255) NULL,
+         status ENUM('queued','sent','failed','skipped') NOT NULL DEFAULT 'queued',
+         error TEXT NULL,
+         sent_at DATETIME NULL,
+         UNIQUE KEY uniq_blast_email (blast_id, email),
+         INDEX idx_blast_status (blast_id, status)
+       )`,
+    );
+    await queryAsync(
+      `CREATE TABLE IF NOT EXISTS email_unsubscribes (
+         email VARCHAR(255) PRIMARY KEY,
+         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+       )`,
+    );
+    // Nothing is sending at boot — anything still marked so was cut short.
+    const result = await queryAsync(
+      "UPDATE email_blasts SET status = 'interrupted' WHERE status = 'sending'",
+    );
+    if (result.affectedRows) {
+      log("warn", "blasts_interrupted_on_boot", { count: result.affectedRows });
+    }
+    log("info", "migration_blast_tables_ready");
+  } catch (err) {
+    log("error", "migration_blast_tables_failed", { message: err.message });
+  }
+}
+
+function unsubscribeToken(email) {
+  const secret = process.env.DASHBOARD_JWT_SECRET || "mediko-dashboard-secret-2026";
+  return crypto
+    .createHmac("sha256", secret)
+    .update(`unsubscribe:${email.toLowerCase()}`)
+    .digest("hex")
+    .slice(0, 32);
+}
+
+function validUnsubscribeToken(email, token) {
+  const expected = Buffer.from(unsubscribeToken(email));
+  const given = Buffer.from(String(token || ""));
+  return expected.length === given.length && crypto.timingSafeEqual(expected, given);
+}
+
+function publicBaseUrl(req) {
+  return (process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`).replace(/\/+$/, "");
+}
+
+function normalizeAudience(raw) {
+  const input = raw && typeof raw === "object" ? raw : {};
+  const audience = {};
+  for (const [source, { statuses }] of Object.entries(BLAST_SOURCES)) {
+    const picked = Array.isArray(input[source]) ? input[source] : [];
+    audience[source] = [...new Set(picked.filter((s) => statuses.includes(s)))];
+  }
+  audience.extra = String(input.extra || "")
+    .split(/[\s,;]+/)
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+  return audience;
+}
+
+// Expands an audience into a deduplicated recipient list, dropping invalid and
+// unsubscribed addresses. Newest submission wins when picking a name.
+async function resolveBlastAudience(audience) {
+  const byEmail = new Map();
+  const invalid = [];
+  const add = (email, fullName) => {
+    const normalized = String(email || "").trim().toLowerCase();
+    if (!EMAIL_RE.test(normalized)) {
+      invalid.push(normalized);
+      return;
+    }
+    if (!byEmail.has(normalized)) {
+      byEmail.set(normalized, { email: normalized, full_name: fullName || null });
+    }
+  };
+
+  for (const [source, { table }] of Object.entries(BLAST_SOURCES)) {
+    if (!audience[source].length) continue;
+    const rows = await queryAsync(
+      `SELECT email_address, full_name FROM ${table} WHERE status IN (?) ORDER BY created_at DESC`,
+      [audience[source]],
+    );
+    rows.forEach((r) => add(r.email_address, r.full_name));
+  }
+  audience.extra.forEach((e) => add(e, null));
+
+  let unsubscribed = 0;
+  if (byEmail.size) {
+    const rows = await queryAsync(
+      "SELECT email FROM email_unsubscribes WHERE email IN (?)",
+      [[...byEmail.keys()]],
+    );
+    rows.forEach((r) => byEmail.delete(r.email.toLowerCase()));
+    unsubscribed = rows.length;
+  }
+
+  return { recipients: [...byEmail.values()], invalid, unsubscribed };
+}
+
+function validateBlastContent(body) {
+  const subject = typeof body?.subject === "string" ? body.subject.trim() : "";
+  const text = typeof body?.body === "string" ? body.body.trim() : "";
+  if (subject.length < 3 || subject.length > 200) {
+    return { error: "Subject must be 3–200 characters." };
+  }
+  if (text.length < 10 || text.length > 50000) {
+    return { error: "Message must be 10–50,000 characters." };
+  }
+  return { subject, text };
+}
+
+// The admin writes plain text; {{name}} is replaced per recipient. Everything
+// is escaped after substitution so neither the admin nor a submitter's name
+// can inject markup.
+function buildBlastMail({ subject, body }, recipient, baseUrl) {
+  const name = recipient.full_name || "there";
+  const fill = (s) => s.replace(/\{\{\s*name\s*\}\}/gi, name);
+  const filledBody = fill(body);
+  const paragraphs = filledBody
+    .split(/\n{2,}/)
+    .map((p) => `<p style="margin: 0 0 16px 0;">${escapeHtml(p).replace(/\n/g, "<br>")}</p>`)
+    .join("");
+  const unsubscribeUrl =
+    `${baseUrl}/api/unsubscribe?email=${encodeURIComponent(recipient.email)}` +
+    `&token=${unsubscribeToken(recipient.email)}`;
+
+  return {
+    from: `"Mediko.ph" <${process.env.MAIL_FROM}>`,
+    to: recipient.email,
+    subject: fill(subject),
+    headers: {
+      "List-Unsubscribe": `<${unsubscribeUrl}>`,
+      "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    },
+    text: `${filledBody}\n\n—\nMediko.ph\nUnsubscribe: ${unsubscribeUrl}`,
+    html: `
+      <div style="font-family: sans-serif; line-height: 1.6; color: #333; max-width: 600px;">
+        ${paragraphs}
+        <p>Stay healthy!<br><strong>Mediko.ph Team</strong></p>
+        <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0 12px 0;">
+        <p style="font-size: 12px; color: #9ca3af;">
+          You are receiving this because you contacted or ordered from Mediko.ph.
+          <a href="${escapeHtml(unsubscribeUrl)}" style="color: #9ca3af;">Unsubscribe</a>
+        </p>
+      </div>
+    `,
+  };
+}
+
+async function runBlast(blastId, baseUrl) {
+  if (runningBlasts.has(blastId)) return;
+  const state = { cancelled: false };
+  runningBlasts.set(blastId, state);
+
+  try {
+    const [blast] = await queryAsync("SELECT * FROM email_blasts WHERE id = ?", [blastId]);
+    if (!blast) return;
+    await queryAsync(
+      "UPDATE email_blasts SET status = 'sending', finished_at = NULL WHERE id = ?",
+      [blastId],
+    );
+    log("info", "blast_started", { blastId, total: blast.total });
+
+    while (!state.cancelled) {
+      // Re-check unsubscribes per batch so an opt-out mid-blast is honoured.
+      const batch = await queryAsync(
+        `SELECT r.id, r.email, r.full_name, u.email AS unsubscribed
+         FROM email_blast_recipients r
+         LEFT JOIN email_unsubscribes u ON u.email = r.email
+         WHERE r.blast_id = ? AND r.status = 'queued'
+         ORDER BY r.id LIMIT 50`,
+        [blastId],
+      );
+      if (!batch.length) break;
+
+      for (const recipient of batch) {
+        if (state.cancelled) break;
+        if (recipient.unsubscribed) {
+          await queryAsync(
+            "UPDATE email_blast_recipients SET status = 'skipped', error = 'unsubscribed' WHERE id = ?",
+            [recipient.id],
+          );
+          continue;
+        }
+
+        let sendError = null;
+        try {
+          await transporter.sendMail(buildBlastMail(blast, recipient, baseUrl));
+        } catch (err) {
+          sendError = err.message;
+        }
+
+        if (sendError) {
+          log("warn", "blast_recipient_failed", { blastId, recipientId: recipient.id, message: sendError });
+          await queryAsync(
+            "UPDATE email_blast_recipients SET status = 'failed', error = ? WHERE id = ?",
+            [sendError.slice(0, 1000), recipient.id],
+          );
+        } else {
+          await queryAsync(
+            "UPDATE email_blast_recipients SET status = 'sent', sent_at = NOW(), error = NULL WHERE id = ?",
+            [recipient.id],
+          );
+        }
+
+        if (BLAST_SEND_DELAY_MS) {
+          await new Promise((resolve) => setTimeout(resolve, BLAST_SEND_DELAY_MS));
+        }
+      }
+    }
+
+    if (state.cancelled) {
+      await queryAsync(
+        "UPDATE email_blast_recipients SET status = 'skipped', error = 'cancelled' WHERE blast_id = ? AND status = 'queued'",
+        [blastId],
+      );
+    }
+    await queryAsync(
+      "UPDATE email_blasts SET status = ?, finished_at = NOW() WHERE id = ?",
+      [state.cancelled ? "cancelled" : "completed", blastId],
+    );
+    log("info", state.cancelled ? "blast_cancelled" : "blast_completed", { blastId });
+  } catch (err) {
+    log("error", "blast_run_failed", { blastId, message: err.message });
+    await queryAsync(
+      "UPDATE email_blasts SET status = 'interrupted' WHERE id = ? AND status = 'sending'",
+      [blastId],
+    ).catch(() => {});
+  } finally {
+    runningBlasts.delete(blastId);
+  }
+}
+
+const BLAST_COUNTS_SQL = `
+  SELECT blast_id,
+         SUM(status = 'queued') AS queued,
+         SUM(status = 'sent') AS sent,
+         SUM(status = 'failed') AS failed,
+         SUM(status = 'skipped') AS skipped
+  FROM email_blast_recipients`;
+
+// ── POST /api/blasts/preview ──────────────────────────────────────────────────
+app.post("/api/blasts/preview", requireAdmin, async (req, res) => {
+  try {
+    const audience = normalizeAudience(req.body?.audience);
+    const { recipients, invalid, unsubscribed } = await resolveBlastAudience(audience);
+    res.json({
+      total: recipients.length,
+      unsubscribed,
+      invalid,
+      max: BLAST_MAX_RECIPIENTS,
+      sample: recipients.slice(0, 10),
+    });
+  } catch (err) {
+    log("error", "blast_preview_failed", { message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/blasts/test ─────────────────────────────────────────────────────
+app.post("/api/blasts/test", requireAdmin, async (req, res) => {
+  const content = validateBlastContent(req.body);
+  if (content.error) return res.status(400).json({ error: content.error });
+  const to = String(req.body?.to || "").trim().toLowerCase();
+  if (!EMAIL_RE.test(to)) {
+    return res.status(400).json({ error: "Enter a valid test email address." });
+  }
+
+  try {
+    await transporter.sendMail(
+      buildBlastMail(
+        { subject: `[TEST] ${content.subject}`, body: content.text },
+        { email: to, full_name: null },
+        publicBaseUrl(req),
+      ),
+    );
+    log("info", "blast_test_sent", { ip: req.ip });
+    res.json({ success: true });
+  } catch (err) {
+    log("error", "blast_test_failed", { message: err.message });
+    res.status(502).json({ error: `Mailer error: ${err.message}` });
+  }
+});
+
+// ── POST /api/blasts ──────────────────────────────────────────────────────────
+app.post("/api/blasts", requireAdmin, async (req, res) => {
+  const content = validateBlastContent(req.body);
+  if (content.error) return res.status(400).json({ error: content.error });
+
+  try {
+    const audience = normalizeAudience(req.body?.audience);
+    const { recipients } = await resolveBlastAudience(audience);
+    if (!recipients.length) {
+      return res.status(400).json({ error: "The selected audience has no recipients." });
+    }
+    if (recipients.length > BLAST_MAX_RECIPIENTS) {
+      return res.status(400).json({
+        error: `Audience has ${recipients.length} recipients; the limit is ${BLAST_MAX_RECIPIENTS}.`,
+      });
+    }
+    // The portal confirms a specific count; refuse if the audience moved since.
+    const expected = parseInt(req.body?.expected_total, 10);
+    if (Number.isInteger(expected) && expected !== recipients.length) {
+      return res.status(409).json({
+        error: `Audience changed: now ${recipients.length} recipients (you confirmed ${expected}). Recount and try again.`,
+      });
+    }
+    // Guards against a double-submit fanning the same mail out twice.
+    const recent = await queryAsync(
+      "SELECT id FROM email_blasts WHERE subject = ? AND created_at >= NOW() - INTERVAL 2 MINUTE",
+      [content.subject],
+    );
+    if (recent.length) {
+      return res.status(409).json({ error: "A blast with this subject was just sent. Wait 2 minutes to resend." });
+    }
+
+    const result = await queryAsync(
+      "INSERT INTO email_blasts (subject, body, audience, total, created_by) VALUES (?, ?, ?, ?, ?)",
+      [
+        content.subject,
+        content.text,
+        JSON.stringify(audience),
+        recipients.length,
+        req.admin?.shopOrigin || "admin",
+      ],
+    );
+    const blastId = result.insertId;
+
+    for (let i = 0; i < recipients.length; i += 500) {
+      const chunk = recipients.slice(i, i + 500).map((r) => [blastId, r.email, r.full_name]);
+      await queryAsync(
+        "INSERT INTO email_blast_recipients (blast_id, email, full_name) VALUES ?",
+        [chunk],
+      );
+    }
+
+    log("info", "blast_created", { blastId, total: recipients.length, ip: req.ip });
+    res.status(202).json({ success: true, id: blastId, total: recipients.length });
+
+    runBlast(blastId, publicBaseUrl(req));
+  } catch (err) {
+    log("error", "blast_create_failed", { message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/blasts ───────────────────────────────────────────────────────────
+app.get("/api/blasts", requireAdmin, async (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
+  const offset = (page - 1) * limit;
+
+  try {
+    const countRows = await queryAsync("SELECT COUNT(*) AS total FROM email_blasts");
+    const totalItems = countRows[0].total;
+    const data = await queryAsync(
+      `SELECT b.id, b.subject, b.status, b.total, b.created_by, b.created_at, b.finished_at,
+              COALESCE(c.queued, 0) AS queued, COALESCE(c.sent, 0) AS sent,
+              COALESCE(c.failed, 0) AS failed, COALESCE(c.skipped, 0) AS skipped
+       FROM email_blasts b
+       LEFT JOIN (${BLAST_COUNTS_SQL} GROUP BY blast_id) c ON c.blast_id = b.id
+       ORDER BY b.created_at DESC LIMIT ? OFFSET ?`,
+      [limit, offset],
+    );
+    res.json({
+      metadata: {
+        total_items: totalItems,
+        total_pages: Math.ceil(totalItems / limit) || 1,
+        current_page: page,
+      },
+      data,
+    });
+  } catch (err) {
+    log("error", "blast_list_failed", { message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/blasts/:id ───────────────────────────────────────────────────────
+app.get("/api/blasts/:id", requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: "Invalid id" });
+  }
+  try {
+    const [blast] = await queryAsync("SELECT * FROM email_blasts WHERE id = ?", [id]);
+    if (!blast) return res.status(404).json({ error: "Blast not found" });
+    const [counts] = await queryAsync(`${BLAST_COUNTS_SQL} WHERE blast_id = ? GROUP BY blast_id`, [id]);
+    const failures = await queryAsync(
+      `SELECT email, full_name, status, error FROM email_blast_recipients
+       WHERE blast_id = ? AND status IN ('failed', 'skipped') ORDER BY id LIMIT 200`,
+      [id],
+    );
+    res.json({
+      ...blast,
+      queued: Number(counts?.queued || 0),
+      sent: Number(counts?.sent || 0),
+      failed: Number(counts?.failed || 0),
+      skipped: Number(counts?.skipped || 0),
+      failures,
+    });
+  } catch (err) {
+    log("error", "blast_get_failed", { id, message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/blasts/:id/resume ───────────────────────────────────────────────
+app.post("/api/blasts/:id/resume", requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: "Invalid id" });
+  }
+  try {
+    const [blast] = await queryAsync("SELECT status FROM email_blasts WHERE id = ?", [id]);
+    if (!blast) return res.status(404).json({ error: "Blast not found" });
+    if (blast.status !== "interrupted" || runningBlasts.has(id)) {
+      return res.status(409).json({ error: `Blast is ${blast.status}; only interrupted blasts can resume.` });
+    }
+    log("info", "blast_resumed", { blastId: id, ip: req.ip });
+    res.json({ success: true, id });
+    runBlast(id, publicBaseUrl(req));
+  } catch (err) {
+    log("error", "blast_resume_failed", { id, message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/blasts/:id/cancel ───────────────────────────────────────────────
+app.post("/api/blasts/:id/cancel", requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: "Invalid id" });
+  }
+  try {
+    const running = runningBlasts.get(id);
+    if (running) {
+      // The worker finishes its current send, then skips the rest itself.
+      running.cancelled = true;
+    } else {
+      const result = await queryAsync(
+        "UPDATE email_blasts SET status = 'cancelled', finished_at = NOW() WHERE id = ? AND status = 'interrupted'",
+        [id],
+      );
+      if (!result.affectedRows) {
+        return res.status(409).json({ error: "Only sending or interrupted blasts can be cancelled." });
+      }
+      await queryAsync(
+        "UPDATE email_blast_recipients SET status = 'skipped', error = 'cancelled' WHERE blast_id = ? AND status = 'queued'",
+        [id],
+      );
+    }
+    log("info", "blast_cancel_requested", { blastId: id, ip: req.ip });
+    res.json({ success: true, id });
+  } catch (err) {
+    log("error", "blast_cancel_failed", { id, message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── /api/unsubscribe ──────────────────────────────────────────────────────────
+// Public, token-guarded. GET only renders a confirm button, because mail
+// scanners prefetch links; the POST does the work and also serves RFC 8058
+// one-click unsubscribe from mailbox providers.
+function unsubscribePage(title, message, formHtml = "") {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>${escapeHtml(title)} · Mediko.ph</title></head>
+    <body style="font-family: sans-serif; background: #f9fafb; color: #333; display: flex; justify-content: center; padding: 48px 16px;">
+      <div style="background: #fff; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.1); padding: 32px; max-width: 420px; width: 100%;">
+        <h2 style="margin-top: 0; color: #0F2237;">${escapeHtml(title)}</h2>
+        <p>${message}</p>
+        ${formHtml}
+      </div>
+    </body></html>`;
+}
+
+app.get("/api/unsubscribe", (req, res) => {
+  const email = String(req.query.email || "").trim().toLowerCase();
+  if (!EMAIL_RE.test(email) || !validUnsubscribeToken(email, req.query.token)) {
+    return res.status(400).send(unsubscribePage("Invalid link", "This unsubscribe link is invalid or incomplete."));
+  }
+  const action =
+    `/api/unsubscribe?email=${encodeURIComponent(email)}&token=${encodeURIComponent(req.query.token)}`;
+  res.send(
+    unsubscribePage(
+      "Unsubscribe",
+      `Stop receiving announcement emails at <strong>${escapeHtml(email)}</strong>? You'll still get emails about your own applications and requests.`,
+      `<form method="POST" action="${escapeHtml(action)}">
+         <button type="submit" style="background: #BB3A45; color: #fff; border: 0; border-radius: 6px; padding: 10px 18px; font-size: 14px; cursor: pointer;">Unsubscribe</button>
+       </form>`,
+    ),
+  );
+});
+
+app.post("/api/unsubscribe", express.urlencoded({ extended: false }), async (req, res) => {
+  const email = String(req.query.email || "").trim().toLowerCase();
+  if (!EMAIL_RE.test(email) || !validUnsubscribeToken(email, req.query.token)) {
+    return res.status(400).send(unsubscribePage("Invalid link", "This unsubscribe link is invalid or incomplete."));
+  }
+  try {
+    await queryAsync("INSERT IGNORE INTO email_unsubscribes (email) VALUES (?)", [email]);
+    log("info", "blast_unsubscribed", { ip: req.ip });
+    res.send(unsubscribePage("Unsubscribed", "You won't receive announcement emails from Mediko.ph anymore."));
+  } catch (err) {
+    log("error", "blast_unsubscribe_failed", { message: err.message });
+    res.status(500).send(unsubscribePage("Something went wrong", "Please try again later."));
   }
 });
 

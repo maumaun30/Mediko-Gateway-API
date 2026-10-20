@@ -55,6 +55,10 @@ When an application is moved to `approved` via `PATCH /api/submissions/:id/statu
 
 Reverting an approved row to `pending`/`rejected` deletes the `price_rule` (cascades the code) and nulls those columns. `GET /api/submissions/:id/discount-usage` proxies to Shopify to report `usage_count`. If Shopify env vars are absent, approval returns 503 — there is no offline fallback path.
 
+### Email blasts
+
+Admin bulk email under `/api/blasts*` (all `requireAdmin`). The audience comes from `applications` / `contact_submissions` / `return_requests` filtered by status, plus pasted addresses. It is deduplicated and excludes `email_unsubscribes`. Tables: `email_blasts`, `email_blast_recipients` (one row per recipient), `email_unsubscribes`, all created by `ensureBlastTables()`. `runBlast` sends one mail per recipient (never BCC), one after another, waiting `BLAST_SEND_DELAY_MS` between sends. It runs in-process with no queue, so blasts still `sending` at boot are marked `interrupted` and can be resumed from the portal. `/api/unsubscribe` is public and HMAC-token-guarded. It is exempt from CORS because its own form posts back to this host. Unsubscribe links use `PUBLIC_BASE_URL`.
+
 ### Admin SPA
 
 `admin-portal/index.html` is a single static HTML file (Tailwind via CDN, vanilla JS, no build) served at `/admin-dashboard` via `express.static`. It calls the same `/api/*` routes with the JWT in `Authorization: Bearer`. The CSP middleware below the routes sets `frame-ancestors` from `ALLOWED_ORIGINS` so the SPA can be embedded inside Shopify admin via App Bridge — keep new origins in sync there.

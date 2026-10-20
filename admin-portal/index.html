@@ -81,6 +81,8 @@
           Messages</button>
         <button data-tab="returns" onclick="setTab('returns')" class="tab-btn px-4 py-2 text-sm font-medium">Return
           Requests</button>
+        <button data-tab="blast" onclick="setTab('blast')" class="tab-btn px-4 py-2 text-sm font-medium">Email
+          Blast</button>
       </nav>
     </div>
 
@@ -215,6 +217,114 @@
         </table>
       </div>
     </section>
+
+    <!-- ───── Email blast panel ───── -->
+    <section data-panel="blast" class="tab-panel hidden">
+      <div class="grid gap-4 lg:grid-cols-5 mb-6">
+        <!-- Audience -->
+        <div class="bg-white shadow rounded-lg p-5 lg:col-span-2">
+          <h3 class="text-sm font-semibold text-gray-900 mb-1">1. Audience</h3>
+          <p class="text-xs text-gray-500 mb-4">
+            Pick who gets this email. Duplicates and unsubscribed addresses are removed automatically.
+          </p>
+
+          <div class="space-y-4" onchange="markAudienceDirty()">
+            <fieldset>
+              <legend class="text-xs font-medium text-gray-600 mb-1">Applications</legend>
+              <div class="flex flex-wrap gap-x-4 gap-y-1 text-sm text-gray-700">
+                <label class="flex items-center gap-2"><input type="checkbox" data-source="applications" value="approved"> Approved</label>
+                <label class="flex items-center gap-2"><input type="checkbox" data-source="applications" value="pending"> Pending</label>
+                <label class="flex items-center gap-2"><input type="checkbox" data-source="applications" value="rejected"> Rejected</label>
+              </div>
+            </fieldset>
+            <fieldset>
+              <legend class="text-xs font-medium text-gray-600 mb-1">Contact messages</legend>
+              <div class="flex flex-wrap gap-x-4 gap-y-1 text-sm text-gray-700">
+                <label class="flex items-center gap-2"><input type="checkbox" data-source="contact" value="pending"> Pending</label>
+                <label class="flex items-center gap-2"><input type="checkbox" data-source="contact" value="resolved"> Resolved</label>
+              </div>
+            </fieldset>
+            <fieldset>
+              <legend class="text-xs font-medium text-gray-600 mb-1">Return requests</legend>
+              <div class="flex flex-wrap gap-x-4 gap-y-1 text-sm text-gray-700">
+                <label class="flex items-center gap-2"><input type="checkbox" data-source="returns" value="approved"> Approved</label>
+                <label class="flex items-center gap-2"><input type="checkbox" data-source="returns" value="pending"> Pending</label>
+                <label class="flex items-center gap-2"><input type="checkbox" data-source="returns" value="rejected"> Rejected</label>
+              </div>
+            </fieldset>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Extra addresses</label>
+              <textarea id="blast-extra" rows="3" oninput="markAudienceDirty()"
+                placeholder="One per line, or separated by commas"
+                class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-mediko-blue resize-y"></textarea>
+            </div>
+          </div>
+
+          <button id="blast-count-btn" onclick="countBlastAudience()"
+            class="mt-4 bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300 text-sm">Count recipients</button>
+          <div id="blast-audience-result" class="mt-3 text-sm text-gray-600"></div>
+        </div>
+
+        <!-- Message -->
+        <div class="bg-white shadow rounded-lg p-5 lg:col-span-3">
+          <h3 class="text-sm font-semibold text-gray-900 mb-1">2. Message</h3>
+          <p class="text-xs text-gray-500 mb-4">
+            Plain text. Blank lines start new paragraphs. <code class="bg-gray-100 px-1 rounded">{{name}}</code>
+            becomes the recipient's name (or “there” when unknown). A signature and unsubscribe link are added for you.
+          </p>
+
+          <label class="block text-xs font-medium text-gray-600 mb-1">Subject</label>
+          <input id="blast-subject" type="text" maxlength="200" placeholder="e.g. New stock of maintenance meds this week"
+            class="w-full border border-gray-300 rounded px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-mediko-blue" />
+
+          <label class="block text-xs font-medium text-gray-600 mb-1">Message</label>
+          <textarea id="blast-body" rows="12" placeholder="Hi {{name}},&#10;&#10;…"
+            class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-mediko-blue resize-y"></textarea>
+
+          <div class="mt-4 pt-4 border-t border-gray-100 flex flex-wrap items-end gap-2">
+            <div class="flex-1 min-w-[200px]">
+              <label class="block text-xs font-medium text-gray-600 mb-1">Send a test to</label>
+              <input id="blast-test-to" type="email" placeholder="you@mediko.ph"
+                class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-mediko-blue" />
+            </div>
+            <button id="blast-test-btn" onclick="sendBlastTest()"
+              class="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300 text-sm">Send test</button>
+            <button id="blast-send-btn" onclick="sendBlast()"
+              class="bg-mediko-red text-white px-4 py-2 rounded shadow hover:brightness-110 text-sm">Send blast</button>
+          </div>
+          <p id="blast-message" class="text-xs mt-2 hidden"></p>
+        </div>
+      </div>
+
+      <h3 class="text-sm font-semibold text-gray-900 mb-2">History</h3>
+      <div id="page-blast" class="text-sm text-gray-500 mb-3 hidden"></div>
+      <div class="bg-white shadow rounded-lg overflow-x-auto">
+        <table class="min-w-full divide-y divide-gray-200">
+          <thead class="bg-gray-100">
+            <tr>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Subject</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Started</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Progress</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="body-blast" class="divide-y divide-gray-200"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <!-- Blast detail modal -->
+  <div id="blast-detail-modal"
+    class="fixed inset-0 z-50 hidden bg-black bg-opacity-60 flex items-center justify-center p-6">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl p-6 max-h-[85vh] flex flex-col">
+      <div class="flex justify-between items-start gap-4 mb-3">
+        <h3 id="blast-detail-title" class="text-lg font-semibold text-gray-900"></h3>
+        <button onclick="closeBlastDetail()" class="text-gray-400 hover:text-gray-600 text-2xl leading-none">&times;</button>
+      </div>
+      <div id="blast-detail-body" class="overflow-y-auto text-sm text-gray-700"></div>
+    </div>
   </div>
 
   <!-- Image preview modal -->
@@ -323,6 +433,11 @@
         page: 1, totalPages: 1,
         filters: {search: '', date_from: '', date_to: ''},
         renderRow: renderReturnRow,
+      },
+      // Not a filterable list — loadTab hands it to loadBlasts. Only the
+      // pagination fields are shared.
+      blast: {
+        page: 1, totalPages: 1,
       },
     };
 
@@ -445,6 +560,7 @@
     // ── Generic loader ────────────────────────────────────────────────────────
 
     async function loadTab(name, page) {
+      if (name === 'blast') return loadBlasts(page);
       const tab = TABS[name];
       if (page) tab.page = page;
       const tbody = document.getElementById(`body-${name}`);
@@ -1015,8 +1131,286 @@
       }
     }
 
+    // ── Email blast ───────────────────────────────────────────────────────────
+
+    // Recipient count from the last "Count recipients". Sending requires it so
+    // the confirm dialog shows a real number, and the server rejects the send
+    // if the audience has changed since.
+    let _blastConfirmedTotal = null;
+    let _blastPollTimer = null;
+
+    const BLAST_STATUS_STYLES = {
+      sending: 'bg-blue-100 text-blue-800',
+      completed: 'bg-green-100 text-green-800',
+      interrupted: 'bg-amber-100 text-amber-800',
+      cancelled: 'bg-gray-200 text-gray-700',
+    };
+
+    async function blastFetch(path, options = {}) {
+      const res = await fetch(`${GATEWAY_URL}${path}`, {
+        ...options,
+        headers: {
+          'Authorization': `Bearer ${dashboardToken}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      if (res.status === 401) {doLogout(); throw new Error('Session expired. Log in again.');}
+      const json = await readJson(res);
+      if (!res.ok) throw new Error(json.error || `Server error ${res.status}`);
+      return json;
+    }
+
+    function blastAudience() {
+      const audience = {
+        applications: [], contact: [], returns: [],
+        extra: document.getElementById('blast-extra').value,
+      };
+      document.querySelectorAll('[data-panel="blast"] input[data-source]:checked')
+        .forEach(cb => audience[cb.dataset.source].push(cb.value));
+      return audience;
+    }
+
+    function markAudienceDirty() {
+      _blastConfirmedTotal = null;
+      document.getElementById('blast-audience-result').innerHTML = '';
+    }
+
+    function showBlastMessage(msg, ok) {
+      const el = document.getElementById('blast-message');
+      el.textContent = msg;
+      el.className = `text-xs mt-2 ${ok ? 'text-green-700' : 'text-red-600'}`;
+    }
+
+    function blastContent() {
+      return {
+        subject: document.getElementById('blast-subject').value.trim(),
+        body: document.getElementById('blast-body').value.trim(),
+      };
+    }
+
+    async function countBlastAudience() {
+      const btn = document.getElementById('blast-count-btn');
+      const out = document.getElementById('blast-audience-result');
+      btn.disabled = true;
+      btn.textContent = 'Counting…';
+      try {
+        const json = await blastFetch('/api/blasts/preview', {
+          method: 'POST',
+          body: JSON.stringify({audience: blastAudience()})
+        });
+        _blastConfirmedTotal = json.total;
+        const notes = [];
+        if (json.unsubscribed) notes.push(`${json.unsubscribed} unsubscribed excluded`);
+        if (json.invalid.length) notes.push(`${json.invalid.length} invalid skipped: ${json.invalid.slice(0, 5).map(escHtml).join(', ')}`);
+        if (json.total > json.max) notes.push(`<span class="text-red-600">over the ${json.max} limit — narrow the audience</span>`);
+        const sample = json.sample.map(r =>
+          `<li class="truncate">${escHtml(r.full_name || '—')} <span class="text-gray-400">${escHtml(r.email)}</span></li>`
+        ).join('');
+        out.innerHTML = `
+          <div class="text-base font-semibold text-gray-900">${json.total} recipient${json.total === 1 ? '' : 's'}</div>
+          ${notes.length ? `<div class="text-xs text-gray-500 mt-1">${notes.join(' · ')}</div>` : ''}
+          ${sample ? `<ul class="text-xs mt-2 space-y-0.5">${sample}</ul>
+            ${json.total > json.sample.length ? `<div class="text-xs text-gray-400 mt-1">…and ${json.total - json.sample.length} more</div>` : ''}` : ''}`;
+        return json.total;
+      } catch (e) {
+        console.error('countBlastAudience error:', e);
+        out.innerHTML = `<span class="text-red-600">${escHtml(e.message)}</span>`;
+        return null;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Count recipients';
+      }
+    }
+
+    async function sendBlastTest() {
+      const {subject, body} = blastContent();
+      const to = document.getElementById('blast-test-to').value.trim();
+      if (!subject || !body) {showBlastMessage('Write a subject and message first.', false); return;}
+      if (!to) {showBlastMessage('Enter an address to send the test to.', false); return;}
+
+      const btn = document.getElementById('blast-test-btn');
+      btn.disabled = true;
+      btn.textContent = 'Sending…';
+      try {
+        await blastFetch('/api/blasts/test', {
+          method: 'POST',
+          body: JSON.stringify({subject, body, to})
+        });
+        showBlastMessage(`Test sent to ${to}.`, true);
+      } catch (e) {
+        console.error('sendBlastTest error:', e);
+        showBlastMessage(e.message, false);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Send test';
+      }
+    }
+
+    async function sendBlast() {
+      const {subject, body} = blastContent();
+      if (!subject || !body) {showBlastMessage('Write a subject and message first.', false); return;}
+
+      const total = _blastConfirmedTotal ?? await countBlastAudience();
+      if (total === null) return;
+      if (!total) {showBlastMessage('The selected audience has no recipients.', false); return;}
+      if (!confirm(`Send “${subject}” to ${total} recipient${total === 1 ? '' : 's'}?\n\nThis cannot be undone.`)) return;
+
+      const btn = document.getElementById('blast-send-btn');
+      btn.disabled = true;
+      btn.textContent = 'Starting…';
+      try {
+        const json = await blastFetch('/api/blasts', {
+          method: 'POST',
+          body: JSON.stringify({subject, body, audience: blastAudience(), expected_total: total})
+        });
+        showBlastMessage(`Blast #${json.id} started — sending to ${json.total} recipients.`, true);
+        document.getElementById('blast-subject').value = '';
+        document.getElementById('blast-body').value = '';
+        loadBlasts(1);
+      } catch (e) {
+        console.error('sendBlast error:', e);
+        showBlastMessage(e.message, false);
+        if (/Audience changed/.test(e.message)) markAudienceDirty();
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Send blast';
+      }
+    }
+
+    function renderBlastRow(b) {
+      const sent = Number(b.sent), failed = Number(b.failed), skipped = Number(b.skipped);
+      const done = sent + failed + skipped;
+      const pct = b.total ? Math.round((done / b.total) * 100) : 0;
+      const cls = BLAST_STATUS_STYLES[b.status] || BLAST_STATUS_STYLES.cancelled;
+      const actions = [
+        `<button onclick="openBlastDetail(${b.id})" class="px-2 py-1 bg-gray-200 text-gray-700 rounded text-xs hover:bg-gray-300">Details</button>`,
+      ];
+      if (b.status === 'interrupted') {
+        actions.push(`<button onclick="blastAction(${b.id}, 'resume')" class="px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700">Resume</button>`);
+      }
+      if (b.status === 'sending' || b.status === 'interrupted') {
+        actions.push(`<button onclick="blastAction(${b.id}, 'cancel')" class="px-2 py-1 bg-red-100 text-red-700 rounded text-xs hover:bg-red-200">Cancel</button>`);
+      }
+      return `<tr>
+      <td class="px-6 py-4 text-sm">
+        <div class="font-medium text-gray-900">${escHtml(b.subject)}</div>
+        <div class="text-xs text-gray-500">#${b.id} · by ${escHtml(b.created_by || 'admin')}</div>
+      </td>
+      <td class="px-6 py-4 text-sm text-gray-500 whitespace-nowrap">${formatDate(b.created_at)}</td>
+      <td class="px-6 py-4 text-sm">
+        <span class="inline-block px-2 py-1 rounded text-xs font-medium ${cls}">${escHtml(b.status)}</span>
+      </td>
+      <td class="px-6 py-4 text-sm min-w-[180px]">
+        <div class="w-full bg-gray-100 rounded h-2 mb-1"><div class="bg-mediko-blue h-2 rounded" style="width: ${pct}%"></div></div>
+        <div class="text-xs text-gray-600">${sent} sent / ${b.total}
+          ${failed ? `· <span class="text-red-600">${failed} failed</span>` : ''}
+          ${skipped ? `· <span class="text-gray-500">${skipped} skipped</span>` : ''}
+        </div>
+      </td>
+      <td class="px-6 py-4 text-sm"><div class="flex gap-1 flex-wrap">${actions.join('')}</div></td>
+    </tr>`;
+    }
+
+    async function loadBlasts(page) {
+      const tab = TABS.blast;
+      if (page) tab.page = page;
+      clearTimeout(_blastPollTimer);
+      const tbody = document.getElementById('body-blast');
+      if (!tbody.children.length) {
+        tbody.innerHTML = `<tr><td colspan="5" class="p-4 text-center text-gray-500">Loading…</td></tr>`;
+      }
+
+      try {
+        const json = await blastFetch(`/api/blasts?limit=20&page=${tab.page}`);
+        tab.page = json.metadata.current_page;
+        tab.totalPages = json.metadata.total_pages;
+        updatePagination('blast', json.metadata);
+
+        tbody.innerHTML = json.data.length
+          ? json.data.map(renderBlastRow).join('')
+          : `<tr><td colspan="5" class="p-4 text-center text-gray-500">No blasts sent yet.</td></tr>`;
+
+        // Keep progress live while something is sending and the tab is open.
+        if (json.data.some(b => b.status === 'sending')) {
+          _blastPollTimer = setTimeout(() => {
+            if (activeTab === 'blast' && dashboardToken) loadBlasts();
+          }, 4000);
+        }
+      } catch (e) {
+        console.error('loadBlasts error:', e);
+        tbody.innerHTML = `<tr><td colspan="5" class="p-4 text-center text-red-500">Error: ${escHtml(e.message)}</td></tr>`;
+      }
+    }
+
+    async function blastAction(id, action) {
+      const question = action === 'cancel'
+        ? 'Stop this blast? Recipients not yet emailed will be skipped.'
+        : 'Resume sending to the recipients not yet emailed?';
+      if (!confirm(question)) return;
+      try {
+        await blastFetch(`/api/blasts/${id}/${action}`, {method: 'POST'});
+        // Give the worker a moment to pick up the change before refreshing.
+        setTimeout(() => loadBlasts(), 800);
+      } catch (e) {
+        console.error('blastAction error:', e);
+        alert(`Failed to ${action} blast: ${e.message}`);
+      }
+    }
+
+    function describeAudience(raw) {
+      let a;
+      try {a = JSON.parse(raw || '{}');} catch {return '—';}
+      const labels = {applications: 'Applications', contact: 'Contact messages', returns: 'Return requests'};
+      const parts = Object.entries(labels)
+        .filter(([key]) => a[key]?.length)
+        .map(([key, label]) => `${label} (${a[key].join(', ')})`);
+      if (a.extra?.length) parts.push(`${a.extra.length} extra address${a.extra.length === 1 ? '' : 'es'}`);
+      return parts.join(' · ') || '—';
+    }
+
+    async function openBlastDetail(id) {
+      const modal = document.getElementById('blast-detail-modal');
+      const body = document.getElementById('blast-detail-body');
+      document.getElementById('blast-detail-title').textContent = `Blast #${id}`;
+      body.innerHTML = '<p class="text-gray-500">Loading…</p>';
+      modal.classList.remove('hidden');
+      try {
+        const b = await blastFetch(`/api/blasts/${id}`);
+        document.getElementById('blast-detail-title').textContent = b.subject;
+        const failures = b.failures.map(f => `
+          <tr>
+            <td class="px-3 py-2">${escHtml(f.email)}</td>
+            <td class="px-3 py-2">${escHtml(f.status)}</td>
+            <td class="px-3 py-2 text-xs text-gray-500 break-all">${escHtml(f.error || '')}</td>
+          </tr>`).join('');
+        body.innerHTML = `
+          <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 mb-4">
+            <dt class="text-gray-500">Status</dt><dd>${escHtml(b.status)}</dd>
+            <dt class="text-gray-500">Audience</dt><dd>${escHtml(describeAudience(b.audience))}</dd>
+            <dt class="text-gray-500">Started</dt><dd>${formatDate(b.created_at)} by ${escHtml(b.created_by || 'admin')}</dd>
+            <dt class="text-gray-500">Finished</dt><dd>${formatDate(b.finished_at)}</dd>
+            <dt class="text-gray-500">Results</dt>
+            <dd>${b.sent} sent · ${b.failed} failed · ${b.skipped} skipped · ${b.queued} queued · ${b.total} total</dd>
+          </dl>
+          <div class="text-xs font-semibold text-gray-500 uppercase mb-1">Message</div>
+          <div class="whitespace-pre-wrap break-words bg-gray-50 border border-gray-200 rounded p-3 mb-4">${escHtml(b.body)}</div>
+          ${failures ? `
+            <div class="text-xs font-semibold text-gray-500 uppercase mb-1">Failed / skipped</div>
+            <table class="min-w-full text-sm divide-y divide-gray-200 border border-gray-200 rounded">
+              <tbody class="divide-y divide-gray-100">${failures}</tbody>
+            </table>` : ''}`;
+      } catch (e) {
+        console.error('openBlastDetail error:', e);
+        body.innerHTML = `<p class="text-red-600">${escHtml(e.message)}</p>`;
+      }
+    }
+
+    function closeBlastDetail() {
+      document.getElementById('blast-detail-modal').classList.add('hidden');
+    }
+
     document.addEventListener('keydown', e => {
-      if (e.key === 'Escape') {closeModal(); closeRejectModal();}
+      if (e.key === 'Escape') {closeModal(); closeRejectModal(); closeBlastDetail();}
     });
 
     // ── Helpers ───────────────────────────────────────────────────────────────
