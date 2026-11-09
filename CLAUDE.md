@@ -36,12 +36,15 @@ MySQL via `mysql2` connection pool. Three tables: `applications`, `contact_submi
 
 ### Admin auth
 
-Two ways to mint a dashboard JWT, both signing with `DASHBOARD_JWT_SECRET`:
+The portal is **admin-only**: it works only embedded in the Shopify admin. There is no password login.
 
-- `POST /api/auth/admin` — password check against `ADMIN_DASHBOARD_PASSWORD`, 8h token.
-- `POST /api/auth/shopify` — accepts any payload where `shopOrigin` ends in `.myshopify.com` and `sessionToken` is truthy. Note: the session token is **not cryptographically verified** against Shopify; trust comes from the App Bridge frame + CORS + frame-ancestors CSP. 30min token.
+1. The portal gets a Shopify session token from App Bridge (a JWT, HS256-signed with `SHOPIFY_CLIENT_SECRET`, ~60s life) and sends it to `POST /api/auth/shopify` as `Authorization: Bearer`.
+2. `verifyShopifySessionToken()` checks it the way Shopify documents: HS256 signature, `exp`/`nbf` (5s clock tolerance), `aud` = app client ID (`SHOPIFY_CLIENT_ID`, else read from `shopify.app.toml`), `iss` and `dest` on the same host. It also pins `dest` to `SHOPIFY_SHOP_DOMAIN`, so tokens for any other shop are refused.
+3. On success it mints a 15-minute dashboard JWT (HS256, `iss: mediko-gateway`, `aud: mediko-admin`, `sub` = Shopify staff user ID) signed with `DASHBOARD_JWT_SECRET`. The portal renews it in the background and re-exchanges silently on any 401.
 
-Admin routes use the `requireAdmin` middleware. Two routes (`/api/submissions` GET and `/api/submissions/:id/status` PATCH) **inline** the JWT check instead of using `requireAdmin` — they predate the helper. Both code paths fall back to a hardcoded secret `"mediko-dashboard-secret-2026"` if `DASHBOARD_JWT_SECRET` is unset; production must set the env var.
+Every admin route uses the `requireAdmin` middleware, which pins the algorithm, issuer and audience. `DASHBOARD_JWT_SECRET` must be 32+ characters; without it, admin routes return 503 (there is no fallback secret). `adminName(req)` labels who did something as `staff #<sub>`. Rejected session tokens log `shopify_session_rejected` with the reason.
+
+The unsubscribe HMAC (`unsubscribeToken`) still uses `DASHBOARD_JWT_SECRET` with its old fallback, so links already sent keep working; changing that secret invalidates old unsubscribe links.
 
 ### Shopify integration
 
@@ -69,7 +72,7 @@ Admin bulk SMS under `/api/sms-blasts*` (all `requireAdmin`), a copy of the emai
 
 ### Admin SPA
 
-`admin-portal/index.html` is a single static HTML file (Tailwind via CDN, vanilla JS, no build) served at `/admin-dashboard` via `express.static`. It calls the same `/api/*` routes with the JWT in `Authorization: Bearer`. The CSP middleware below the routes sets `frame-ancestors` from `ALLOWED_ORIGINS` so the SPA can be embedded inside Shopify admin via App Bridge — keep new origins in sync there.
+`admin-portal/index.html` is a single static HTML file (Tailwind via CDN, vanilla JS, no build) served at `/admin-dashboard` via `express.static`. It calls the same `/api/*` routes with the dashboard JWT in `Authorization: Bearer` (see **Admin auth**). The CSP middleware below the routes sets `frame-ancestors` from `ALLOWED_ORIGINS` so the SPA can be embedded inside Shopify admin via App Bridge — keep new origins in sync there.
 
 ### File uploads
 
@@ -87,4 +90,4 @@ Two Multer instances (`upload` for ID photos, `returnsUpload` for return attachm
 
 ### Logging
 
-Use the `log(level, event, data)` helper for any new logging — it emits one JSON line per event with a timestamp. Do not add bare `console.log` calls in request paths (a couple remain in the auth routes as debug leftovers; new code shouldn't follow that pattern).
+Use the `log(level, event, data)` helper for any new logging — it emits one JSON line per event with a timestamp. Do not add bare `console.log` calls in request paths.

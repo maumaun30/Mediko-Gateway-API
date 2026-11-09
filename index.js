@@ -333,16 +333,72 @@ const queryAsync = (sql, params) =>
     db.query(sql, params, (err, rows) => (err ? reject(err) : resolve(rows))),
   );
 
-function requireAdmin(req, res, next) {
+// ── Admin auth (Shopify session token → dashboard JWT) ────────────────────────
+// The portal only runs embedded in the Shopify admin. App Bridge gives it a
+// Shopify session token: a JWT signed HS256 with this app's client secret,
+// valid ~60s. POST /api/auth/shopify verifies that token and exchanges it for
+// a short-lived dashboard JWT, which every admin route checks via requireAdmin.
+const DASHBOARD_JWT = { issuer: "mediko-gateway", audience: "mediko-admin", ttlSec: 15 * 60 };
+
+// Client ID is public (it's in shopify.app.toml); env wins if set.
+function shopifyClientId() {
+  if (process.env.SHOPIFY_CLIENT_ID) return process.env.SHOPIFY_CLIENT_ID;
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith("Bearer ")) {
-      return res.status(401).json({ error: "Missing Bearer token" });
-    }
-    const token = authHeader.split(" ")[1];
-    const secret =
-      process.env.DASHBOARD_JWT_SECRET || "mediko-dashboard-secret-2026";
-    req.admin = jwt.verify(token, secret);
+    const toml = fs.readFileSync(path.join(__dirname, "shopify.app.toml"), "utf8");
+    const m = toml.match(/^client_id\s*=\s*"([^"]+)"/m);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+// No fallback: without a real secret, admin auth is off rather than forgeable.
+function dashboardSecret() {
+  const s = process.env.DASHBOARD_JWT_SECRET;
+  return s && s.length >= 32 ? s : null;
+}
+
+if (!dashboardSecret()) {
+  log("error", "dashboard_jwt_secret_missing", {
+    hint: "Set DASHBOARD_JWT_SECRET (32+ random characters). Admin routes return 503 until then.",
+  });
+}
+
+// Returns the verified payload or throws. Follows Shopify's checks: HS256
+// signature with the client secret, exp/nbf, aud = client ID, iss and dest on
+// the same host. Also pins dest to this store so no other shop's token works.
+function verifyShopifySessionToken(token) {
+  const secret = process.env.SHOPIFY_CLIENT_SECRET;
+  const clientId = shopifyClientId();
+  if (!secret || !clientId) throw new Error("Shopify app credentials not configured");
+
+  const payload = jwt.verify(token, secret, {
+    algorithms: ["HS256"],
+    audience: clientId,
+    clockTolerance: 5, // seconds of clock skew
+  });
+  const destHost = new URL(payload.dest).hostname;
+  const issHost = new URL(payload.iss).hostname;
+  if (destHost !== issHost) throw new Error("iss/dest mismatch");
+  const shop = String(process.env.SHOPIFY_SHOP_DOMAIN || "").toLowerCase();
+  if (!shop || destHost.toLowerCase() !== shop) throw new Error("token is for another shop");
+  if (!payload.sub) throw new Error("token has no user");
+  return payload;
+}
+
+function requireAdmin(req, res, next) {
+  const secret = dashboardSecret();
+  if (!secret) return res.status(503).json({ error: "Admin auth is not configured on the server." });
+  const authHeader = req.headers.authorization || "";
+  if (!authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Missing Bearer token" });
+  }
+  try {
+    req.admin = jwt.verify(authHeader.slice(7), secret, {
+      algorithms: ["HS256"],
+      issuer: DASHBOARD_JWT.issuer,
+      audience: DASHBOARD_JWT.audience,
+    });
     next();
   } catch {
     return res.status(401).json({ error: "Invalid or expired token" });
@@ -502,7 +558,7 @@ function adminRecipients() {
 }
 
 function adminName(req) {
-  return (req.admin && req.admin.shopOrigin) || "admin";
+  return req.admin && req.admin.sub ? `staff #${req.admin.sub}` : "admin";
 }
 
 // ── /api/settings (admin) ─────────────────────────────────────────────────────
@@ -1743,23 +1799,7 @@ app.post(
 );
 
 // ── GET /api/submissions ──────────────────────────────────────────────────────
-app.get("/api/submissions", (req, res) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith("Bearer ")) {
-      return res.status(401).json({ error: "Missing Bearer token" });
-    }
-
-    const token = authHeader.split(" ")[1];
-    const secret =
-      process.env.DASHBOARD_JWT_SECRET || "mediko-dashboard-secret-2026"; // ✅ SAME FALLBACK
-
-    jwt.verify(token, secret);
-    console.log("✅ JWT verified OK"); // DEBUG
-  } catch (err) {
-    console.log("❌ JWT ERROR:", err.message); // DEBUG
-    return res.status(401).json({ error: "Invalid or expired token" });
-  }
+app.get("/api/submissions", requireAdmin, (req, res) => {
 
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
@@ -1837,19 +1877,7 @@ app.get("/api/submissions", (req, res) => {
 });
 
 // ── PATCH /api/submissions/:id/status ────────────────────────────────────────
-app.patch("/api/submissions/:id/status", async (req, res) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith("Bearer ")) {
-      return res.status(401).json({ error: "Missing Bearer token" });
-    }
-    const token = authHeader.split(" ")[1];
-    const secret =
-      process.env.DASHBOARD_JWT_SECRET || "mediko-dashboard-secret-2026";
-    jwt.verify(token, secret);
-  } catch {
-    return res.status(401).json({ error: "Invalid or expired token" });
-  }
+app.patch("/api/submissions/:id/status", requireAdmin, async (req, res) => {
 
   const id = parseInt(req.params.id, 10);
   const { status, reason } = req.body || {};
@@ -2302,7 +2330,7 @@ app.post("/api/submissions/:id/refund", requireAdmin, async (req, res) => {
 
     await addShopifyTag(orderGid, REFUND_TAG);
 
-    const by = req.admin?.shopOrigin || "admin";
+    const by = adminName(req);
     await queryAsync(
       "UPDATE applications SET refunded_at = NOW(), refunded_by = ? WHERE id = ?",
       [by.slice(0, 120), id],
@@ -2358,48 +2386,36 @@ app.delete("/api/submissions/:id/refund", requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/api/auth/admin', express.json(), (req, res) => {
-  const { password } = req.body;
-  const adminPassword = process.env.ADMIN_DASHBOARD_PASSWORD;
-
-  if (!adminPassword || password !== adminPassword) {
-    return res.status(401).json({ error: 'Invalid password' });
-  }
-
-  const secret = process.env.DASHBOARD_JWT_SECRET || 'mediko-dashboard-secret-2026';
-  const token = jwt.sign(
-    { admin: true, exp: Math.floor(Date.now() / 1000) + 8 * 60 * 60 }, // 8h
-    secret
-  );
-
-  res.json({ token });
-});
-
 // ── Shopify App Bridge Auth ───────────────────────────────────────────────────
-app.post("/api/auth/shopify", express.json(), async (req, res) => {
+// Exchanges a verified Shopify session token for a dashboard JWT.
+// The session token arrives as `Authorization: Bearer <token>` (App Bridge's
+// convention) or as { sessionToken } in the body.
+app.post("/api/auth/shopify", express.json(), (req, res) => {
+  const secret = dashboardSecret();
+  if (!secret) return res.status(503).json({ error: "Admin auth is not configured on the server." });
+
+  const header = req.headers.authorization || "";
+  const sessionToken = header.startsWith("Bearer ") ? header.slice(7) : req.body?.sessionToken;
+  if (!sessionToken) return res.status(401).json({ error: "Missing Shopify session token" });
+
+  let shopify;
   try {
-    const { shopOrigin, sessionToken } = req.body;
-
-    // ✅ Simple Shopify origin validation (no external verification needed)
-    if (!shopOrigin?.endsWith(".myshopify.com") || !sessionToken) {
-      return res.status(401).json({ error: "Invalid Shopify session" });
-    }
-
-    const secret =
-      process.env.DASHBOARD_JWT_SECRET || "mediko-dashboard-secret-2026";
-
-    // Generate short-lived JWT for dashboard
-    const dashboardToken = jwt.sign(
-      { shopOrigin, admin: true, exp: Math.floor(Date.now() / 1000) + 30 * 60 }, // 30min vs 60min
-      secret,
-    );
-
-    console.log("✅ Token generated for:", shopOrigin);
-    res.json({ token: dashboardToken });
+    shopify = verifyShopifySessionToken(String(sessionToken));
   } catch (err) {
-    console.error("Auth error:", err);
-    res.status(401).json({ error: "Auth failed" });
+    log("warn", "shopify_session_rejected", { reason: err.message, ip: req.ip });
+    return res.status(401).json({ error: "Invalid Shopify session" });
   }
+
+  const shop = new URL(shopify.dest).hostname;
+  const token = jwt.sign({ shop, sid: shopify.sid }, secret, {
+    algorithm: "HS256",
+    subject: String(shopify.sub), // Shopify staff user ID
+    issuer: DASHBOARD_JWT.issuer,
+    audience: DASHBOARD_JWT.audience,
+    expiresIn: DASHBOARD_JWT.ttlSec,
+  });
+  log("info", "admin_session_started", { shop, user: String(shopify.sub), ip: req.ip });
+  res.json({ token, expiresIn: DASHBOARD_JWT.ttlSec });
 });
 
 // ── Frame Protection for Shopify ─────────────────────────────────────────────
@@ -2967,7 +2983,7 @@ app.post("/api/blasts", requireAdmin, async (req, res) => {
         content.text,
         JSON.stringify(audience),
         recipients.length,
-        req.admin?.shopOrigin || "admin",
+        adminName(req),
       ],
     );
     const blastId = result.insertId;
