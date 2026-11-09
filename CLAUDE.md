@@ -67,6 +67,10 @@ Admin bulk email under `/api/blasts*` (all `requireAdmin`). The audience comes f
 
 Two Multer instances (`upload` for ID photos, `returnsUpload` for return attachments), both writing to `./uploads/` with a 5MB image-only filter. Files are served read-only at `/view-uploads/*`. The `uploads/` directory is preserved across deploys (excluded from rsync) — never `rm -rf` it.
 
+### Health check
+
+`GET /health` (public, also answers HEAD) is for UptimeRobot. It runs `SELECT 1` with a 3s timeout: 200 `{"status":"ok"}` when the DB answers, 503 when it doesn't. It sits above the request logger so monitor pings aren't logged; only failures log `health_check_failed`.
+
 ### Logging
 
 Use the `log(level, event, data)` helper for any new logging — it emits one JSON line per event with a timestamp. Do not add bare `console.log` calls in request paths (a couple remain in the auth routes as debug leftovers; new code shouldn't follow that pattern).

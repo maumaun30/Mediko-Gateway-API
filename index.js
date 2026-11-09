@@ -63,6 +63,33 @@ app.use((req, res, next) =>
 
 app.use(express.json({ limit: "1mb" }));
 
+// ── Health check (for uptime monitors) ────────────────────────────────────────
+// Mounted before the request logger so monitor pings don't flood the logs.
+// 200 when the process and DB answer; 503 when the DB is down or slow, so the
+// monitor alerts on both a dead server and a dead database. Express serves
+// HEAD from this GET handler too. Only failures are logged.
+const HEALTH_DB_TIMEOUT_MS = 3000;
+
+app.get("/health", async (_req, res) => {
+  res.set("Cache-Control", "no-store");
+  const started = Date.now();
+  let timer;
+  try {
+    await Promise.race([
+      queryAsync("SELECT 1"),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("DB ping timed out")), HEALTH_DB_TIMEOUT_MS);
+      }),
+    ]);
+    res.json({ status: "ok", db: "ok", dbMs: Date.now() - started, uptimeSec: Math.round(process.uptime()) });
+  } catch (err) {
+    log("error", "health_check_failed", { message: err.message });
+    res.status(503).json({ status: "error", db: "down" });
+  } finally {
+    clearTimeout(timer);
+  }
+});
+
 // ── Request logger middleware ─────────────────────────────────────────────────
 app.use((req, _res, next) => {
   log("info", "request_received", {
