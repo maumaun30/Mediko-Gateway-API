@@ -48,7 +48,7 @@ Admin routes use the `requireAdmin` middleware. Two routes (`/api/submissions` G
 When an application is moved to `approved` via `PATCH /api/submissions/:id/status`:
 
 1. `findOrCreateShopifyCustomer` — search by email, create if missing (tagged `senior-pwd-discount`).
-2. Create a `price_rule` with `customer_selection: "prerequisite"` tied to that customer ID, `usage_limit: 1`, `once_per_customer: true`, percentage discount `DISCOUNT_PERCENTAGE`.
+2. Create a `price_rule` with `customer_selection: "prerequisite"` tied to that customer ID, `usage_limit: 1`, `once_per_customer: true`, percentage discount from the `discount_percentage` setting.
 3. Create a `discount_code` under that price rule, format `MEDIKO-{appId}-{8 hex chars}`.
 4. Persist `discount_code`, `discount_price_rule_id`, `discount_code_id` on the row.
 5. Email the code to the applicant.
@@ -57,7 +57,15 @@ Reverting an approved row to `pending`/`rejected` deletes the `price_rule` (casc
 
 ### Email blasts
 
-Admin bulk email under `/api/blasts*` (all `requireAdmin`). The audience comes from `applications` / `contact_submissions` / `return_requests` filtered by status, plus pasted addresses. It is deduplicated and excludes `email_unsubscribes`. Tables: `email_blasts`, `email_blast_recipients` (one row per recipient), `email_unsubscribes`, all created by `ensureBlastTables()`. `runBlast` sends one mail per recipient (never BCC), one after another, waiting `BLAST_SEND_DELAY_MS` between sends. It runs in-process with no queue, so blasts still `sending` at boot are marked `interrupted` and can be resumed from the portal. `/api/unsubscribe` is public and HMAC-token-guarded. It is exempt from CORS because its own form posts back to this host. Unsubscribe links use `PUBLIC_BASE_URL`.
+Admin bulk email under `/api/blasts*` (all `requireAdmin`). The audience comes from `applications` / `contact_submissions` / `return_requests` filtered by status, plus pasted addresses. It is deduplicated and excludes `email_unsubscribes`. Tables: `email_blasts`, `email_blast_recipients` (one row per recipient), `email_unsubscribes`, all created by `ensureBlastTables()`. `runBlast` sends one mail per recipient (never BCC), one after another, waiting the `email_blast_delay_ms` setting between sends. It runs in-process with no queue, so blasts still `sending` at boot are marked `interrupted` and can be resumed from the portal. `/api/unsubscribe` is public and HMAC-token-guarded. It is exempt from CORS because its own form posts back to this host. Unsubscribe links use `PUBLIC_BASE_URL`.
+
+### SMS shipping notifications
+
+`POST /webhooks/shopify/fulfillments-create` (declared in `shopify.app.toml`, needs `read_fulfillments`) texts the customer via Semaphore when an order ships. It is mounted **above** the global `express.json()` because HMAC verification needs the raw body; the secret is `SHOPIFY_WEBHOOK_SECRET` or else `SHOPIFY_CLIENT_SECRET`. Flow: verify HMAC, skip non-`success` fulfillments, `INSERT IGNORE` into `sms_notifications` (unique `fulfillment_id`, so webhook retries never double-text), respond 200, then pick a phone number (fulfillment `destination.phone`, else the order's shipping/order/billing/customer phone via GraphQL), normalize to `639XXXXXXXXX`, send, and record `sent` / `failed` / `skipped` on the row. Messages are kept ASCII and within 160 chars (one credit); the tracking link is dropped if it would overflow. The Semaphore key comes only from `SEMAPHORE_API_KEY` in `.env`; on/off and sender name are portal settings (see **Settings vs secrets**). `GET /api/sms/settings` is a read-only status for the SMS tabs. Other `requireAdmin` routes: `GET /api/sms/account` (credit balance, cached 60s because Semaphore rate-limits it), `GET /api/sms/notifications` (log with `status` / `search` filters), `POST /api/sms/notifications/:id/retry` (failed or skipped rows; optional `{ "phone" }` for orders that had no number), `POST /api/sms/test` (`{ "number" }`).
+
+### SMS blasts
+
+Admin bulk SMS under `/api/sms-blasts*` (all `requireAdmin`), a copy of the email blast design: audience from the same `BLAST_SOURCES` by status (using each row's `contact_number`) plus pasted numbers (split on newlines/commas/semicolons, not spaces), normalized to `639XXXXXXXXX`, deduplicated, minus `sms_optouts`. Tables `sms_blasts`, `sms_blast_recipients`, `sms_optouts`, created by `ensureSmsBlastTables()`. `runSmsBlast` sends one Semaphore request per recipient (so `{{name}}` can become the first name), waiting the `sms_blast_delay_ms` setting between sends; blasts still `sending` at boot become `interrupted` and can be resumed. Message text is forced to ASCII and capped at 459 chars (3 SMS). Messages starting with "TEST" are rejected because Semaphore silently drops them. There is no SMS reply/unsubscribe channel: admins manage `/api/sms-optouts` by hand in the portal. Opt-outs only block blasts, not shipping notifications.
 
 ### Admin SPA
 
@@ -66,6 +74,12 @@ Admin bulk email under `/api/blasts*` (all `requireAdmin`). The audience comes f
 ### File uploads
 
 Two Multer instances (`upload` for ID photos, `returnsUpload` for return attachments), both writing to `./uploads/` with a 5MB image-only filter. Files are served read-only at `/view-uploads/*`. The `uploads/` directory is preserved across deploys (excluded from rsync) — never `rm -rf` it.
+
+### Settings vs secrets
+
+**Secrets and infrastructure stay in `.env` only** — DB, Brevo, `MAIL_FROM`, admin/JWT secrets, `ALLOWED_ORIGINS`, Shopify credentials, `SEMAPHORE_API_KEY`, webhook secret, URLs, `TESTING_MODE`. Never store these in the DB or return their values to the portal (it may only report set / not set).
+
+**Operating config lives in `app_settings`**, edited in the portal's Settings tab via `GET/PUT /api/settings`. The `SETTINGS` registry in `index.js` defines each key (type, bounds, group, label, legacy env var). Read values with `getSetting(key)` at use time — never cache them in module-level constants — so a save takes effect without a restart. Precedence: saved value → env var of the same meaning (keeps old `.env` files working) → default. To add a setting, add it to `SETTINGS`; the portal form is generated from it. Current keys: `discount_percentage`, `discount_autogen_enabled`, `admin_email`, `admin_cc`, `email_blast_delay_ms`, `sms_shipping_enabled`, `sms_sender_name`, `sms_blast_delay_ms`.
 
 ### Health check
 

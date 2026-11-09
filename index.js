@@ -61,6 +61,14 @@ app.use((req, res, next) =>
   req.path === "/api/unsubscribe" ? next() : corsMiddleware(req, res, next),
 );
 
+// Shopify webhooks need the raw body for HMAC verification, so this route is
+// mounted before the global JSON parser. Handler lives in the SMS section below.
+app.post(
+  "/webhooks/shopify/fulfillments-create",
+  express.raw({ type: "application/json", limit: "1mb" }),
+  handleFulfillmentCreateWebhook,
+);
+
 app.use(express.json({ limit: "1mb" }));
 
 // ── Health check (for uptime monitors) ────────────────────────────────────────
@@ -218,9 +226,12 @@ db.getConnection((err, conn) => {
     log("info", "db_connected");
     conn.release();
     // ensureStatusColumn();
+    ensureSettingsTable();
     ensureContactTable();
     ensureReturnsTable();
     ensureBlastTables();
+    ensureSmsTable();
+    ensureSmsBlastTables();
   }
 });
 
@@ -338,6 +349,217 @@ function requireAdmin(req, res, next) {
   }
 }
 
+// ── Settings (non-secret config, editable in the portal) ──────────────────────
+// Secrets and infrastructure (DB, mail credentials, JWT/admin secrets, Shopify
+// and Semaphore keys, CORS origins, URLs) live ONLY in .env and are never
+// stored in the DB or sent to the portal. Everyday operating config lives here:
+// a value saved from the portal's Settings tab wins, else the env var of the
+// same meaning (so existing .env values keep working until someone saves),
+// else the default.
+const EMAIL_LIST_RE = /^[^\s@,]+@[^\s@,]+\.[^\s@,]{2,}$/;
+
+const SETTINGS = {
+  discount_percentage: {
+    group: "Discounts", label: "Discount percentage", type: "number", min: 1, max: 100,
+    env: "DISCOUNT_PERCENTAGE", default: 20,
+    help: "Percent off on the single-use code sent when an application is approved.",
+  },
+  discount_autogen_enabled: {
+    group: "Discounts", label: "Create a Shopify discount code on approval", type: "boolean",
+    env: "DISCOUNT_AUTOGEN_ENABLED", default: true,
+    help: "When off, approving still works but no code or approval email is sent.",
+  },
+  admin_email: {
+    group: "Notifications", label: "Admin notification email", type: "email",
+    env: "ADMIN_EMAIL", default: "",
+    help: "Gets a copy of every application, contact message and return request.",
+  },
+  admin_cc: {
+    group: "Notifications", label: "CC", type: "email_list",
+    env: "ADMIN_CC", default: "",
+    help: "Optional. Separate several addresses with commas.",
+  },
+  email_blast_delay_ms: {
+    group: "Email blasts", label: "Pause between emails (ms)", type: "number", min: 0, max: 10000,
+    env: "BLAST_SEND_DELAY_MS", default: 300,
+    help: "Keep within your Brevo plan's sending rate.",
+  },
+  sms_shipping_enabled: {
+    group: "SMS", label: "Text customers when their order ships", type: "boolean",
+    env: "SMS_SHIPPING_ENABLED", default: true,
+    help: "Needs SEMAPHORE_API_KEY in the server .env.",
+  },
+  sms_sender_name: {
+    group: "SMS", label: "Sender name", type: "sender_name",
+    env: "SEMAPHORE_SENDER_NAME", default: "",
+    help: "Must be approved in Semaphore first. Blank uses Semaphore's default sender.",
+  },
+  sms_blast_delay_ms: {
+    group: "SMS", label: "Pause between blast texts (ms)", type: "number", min: 0, max: 10000,
+    env: "SMS_BLAST_DELAY_MS", default: 600,
+    help: "Spacing between texts in an SMS blast.",
+  },
+};
+
+// Env-only values the portal may report as set / missing, never their contents.
+const SECRET_ENV_STATUS = [
+  ["SEMAPHORE_API_KEY", "Semaphore API key (SMS)"],
+  ["SHOPIFY_CLIENT_SECRET", "Shopify client secret (API + webhook signatures)"],
+  ["SHOPIFY_WEBHOOK_SECRET", "Shopify webhook secret (only for webhooks made in Shopify admin)"],
+  ["BREVO_PASS", "Brevo SMTP key (email)"],
+  ["DASHBOARD_JWT_SECRET", "Dashboard JWT secret"],
+];
+
+let settingsCache = {}; // key → raw string from app_settings
+
+function parseSetting(def, raw) {
+  if (raw === undefined || raw === null) return def.default;
+  const str = String(raw).trim();
+  switch (def.type) {
+    case "boolean":
+      return str === "" ? def.default : str.toLowerCase() !== "false";
+    case "number": {
+      const n = parseFloat(str);
+      return Number.isFinite(n) ? Math.min(def.max, Math.max(def.min, n)) : def.default;
+    }
+    default:
+      return str;
+  }
+}
+
+function settingSource(key) {
+  if (Object.prototype.hasOwnProperty.call(settingsCache, key)) return "saved";
+  return process.env[SETTINGS[key].env] !== undefined ? "env" : "default";
+}
+
+function getSetting(key) {
+  const def = SETTINGS[key];
+  if (!def) throw new Error(`Unknown setting ${key}`);
+  const source = settingSource(key);
+  if (source === "saved") return parseSetting(def, settingsCache[key]);
+  if (source === "env") return parseSetting(def, process.env[def.env]);
+  return def.default;
+}
+
+// Returns { value } as the string to store, or { error }.
+function validateSetting(def, input) {
+  const str = typeof input === "string" ? input.trim() : input;
+  switch (def.type) {
+    case "boolean":
+      if (typeof input !== "boolean") return { error: "must be on or off" };
+      return { value: input ? "true" : "false" };
+    case "number": {
+      const n = typeof str === "number" ? str : parseFloat(str);
+      if (!Number.isFinite(n) || n < def.min || n > def.max) return { error: `must be ${def.min}–${def.max}` };
+      return { value: String(n) };
+    }
+    case "email":
+      if (str && !EMAIL_LIST_RE.test(str)) return { error: "must be an email address" };
+      return { value: str || "" };
+    case "email_list": {
+      const list = String(str || "").split(",").map((e) => e.trim()).filter(Boolean);
+      const bad = list.filter((e) => !EMAIL_LIST_RE.test(e));
+      if (bad.length) return { error: `invalid address: ${bad.join(", ")}` };
+      return { value: list.join(",") };
+    }
+    case "sender_name":
+      if (str && !/^[A-Za-z0-9 ]{1,11}$/.test(str)) return { error: "must be 1–11 letters, numbers or spaces" };
+      return { value: str || "" };
+    default:
+      return { error: "unsupported" };
+  }
+}
+
+async function ensureSettingsTable() {
+  try {
+    await queryAsync(
+      `CREATE TABLE IF NOT EXISTS app_settings (
+         setting_key VARCHAR(64) PRIMARY KEY,
+         setting_value TEXT NULL,
+         updated_by VARCHAR(120) NULL,
+         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+       )`,
+    );
+    await loadSettings();
+    log("info", "migration_settings_table_ready", { saved: Object.keys(settingsCache).length });
+  } catch (err) {
+    log("error", "migration_settings_table_failed", { message: err.message });
+  }
+}
+
+async function loadSettings() {
+  const rows = await queryAsync("SELECT setting_key, setting_value FROM app_settings WHERE setting_key IN (?)", [
+    Object.keys(SETTINGS),
+  ]);
+  const next = {};
+  for (const r of rows) if (r.setting_value !== null) next[r.setting_key] = r.setting_value;
+  settingsCache = next;
+}
+
+function adminRecipients() {
+  const cc = getSetting("admin_cc");
+  return { to: getSetting("admin_email"), cc: cc ? cc.split(",") : [] };
+}
+
+function adminName(req) {
+  return (req.admin && req.admin.shopOrigin) || "admin";
+}
+
+// ── /api/settings (admin) ─────────────────────────────────────────────────────
+app.get("/api/settings", requireAdmin, (_req, res) => {
+  res.json({
+    settings: Object.entries(SETTINGS).map(([key, def]) => ({
+      key,
+      group: def.group,
+      label: def.label,
+      help: def.help,
+      type: def.type,
+      min: def.min,
+      max: def.max,
+      env: def.env,
+      value: getSetting(key),
+      source: settingSource(key),
+    })),
+    secrets: SECRET_ENV_STATUS.map(([name, label]) => ({ name, label, set: Boolean(process.env[name]) })),
+  });
+});
+
+app.put("/api/settings", requireAdmin, async (req, res) => {
+  const values = req.body && typeof req.body.values === "object" ? req.body.values : null;
+  if (!values || !Object.keys(values).length) return res.status(400).json({ error: "Nothing to save." });
+
+  const updates = [];
+  const errors = [];
+  for (const [key, input] of Object.entries(values)) {
+    const def = SETTINGS[key];
+    if (!def) {
+      errors.push(`${key}: unknown setting`);
+      continue;
+    }
+    const result = validateSetting(def, input);
+    if (result.error) errors.push(`${def.label} ${result.error}`);
+    else updates.push([key, result.value]);
+  }
+  if (errors.length) return res.status(400).json({ error: errors.join("; ") });
+
+  try {
+    for (const [key, value] of updates) {
+      await queryAsync(
+        `INSERT INTO app_settings (setting_key, setting_value, updated_by) VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_by = VALUES(updated_by)`,
+        [key, value, adminName(req)],
+      );
+    }
+    await loadSettings();
+    log("info", "settings_saved", { keys: updates.map(([k]) => k), ip: req.ip });
+    res.json({ success: true });
+  } catch (err) {
+    log("error", "settings_save_failed", { message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 // ── Mailer ────────────────────────────────────────────────────────────────────
 const transporter = nodemailer.createTransport({
   host: "smtp-relay.brevo.com",
@@ -407,11 +629,7 @@ async function sendApplicationEmails(application, reqFiles, metadataStr) {
 
   const adminMail = {
     from: `"Mediko Gateway" <${process.env.MAIL_FROM}>`,
-    to: process.env.ADMIN_EMAIL,
-    cc:
-      process.env.ADMIN_CC && process.env.ADMIN_CC.trim() !== ""
-        ? process.env.ADMIN_CC.split(",")
-        : [],
+    ...adminRecipients(),
     subject: `[Mediko] New application #${insertId} — ${full_name}`,
     attachments: attachments,
     html: `
@@ -453,8 +671,6 @@ async function sendApplicationEmails(application, reqFiles, metadataStr) {
 // Upstream failures here answer 500, not 502: Cloudflare fronts this app and
 // replaces a 502 body with its own HTML error page, so the JSON never lands.
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2026-04";
-const DISCOUNT_PERCENTAGE = parseFloat(process.env.DISCOUNT_PERCENTAGE || "20");
-const DISCOUNT_AUTOGEN_ENABLED = process.env.DISCOUNT_AUTOGEN_ENABLED !== "false";
 
 // Refresh this long before a minted token actually expires, so a request never
 // races the expiry.
@@ -644,7 +860,7 @@ async function createDiscountForApplicant(applicant) {
         startsAt: new Date().toISOString(),
         customerSelection: { customers: { add: [customerGid] } },
         customerGets: {
-          value: { percentage: DISCOUNT_PERCENTAGE / 100 },
+          value: { percentage: getSetting("discount_percentage") / 100 },
           items: { all: true },
         },
         combinesWith: {
@@ -802,7 +1018,7 @@ async function sendApprovalEmail(applicant, code) {
         <div style="background-color: #f0fdf4; border: 1px solid #16a34a; padding: 20px; border-radius: 8px; margin: 20px 0; text-align: center;">
           <p style="margin: 0 0 8px 0; color: #555;">Your personal discount code:</p>
           <p style="margin: 0; font-size: 28px; font-weight: bold; color: #15803d; letter-spacing: 2px;">${code}</p>
-          <p style="margin: 12px 0 0 0; font-size: 13px; color: #555;">${DISCOUNT_PERCENTAGE}% off — tied to your email address.</p>
+          <p style="margin: 12px 0 0 0; font-size: 13px; color: #555;">${getSetting("discount_percentage")}% off — tied to your email address.</p>
         </div>
 
         <div style="background-color: #fff7ed; border: 1px solid #f97316; padding: 15px; border-radius: 8px; margin: 20px 0;">
@@ -920,11 +1136,7 @@ async function sendContactEmails(submission, metadataStr) {
 
   const adminMail = {
     from: `"Mediko Gateway" <${process.env.MAIL_FROM}>`,
-    to: process.env.ADMIN_EMAIL,
-    cc:
-      process.env.ADMIN_CC && process.env.ADMIN_CC.trim() !== ""
-        ? process.env.ADMIN_CC.split(",")
-        : [],
+    ...adminRecipients(),
     subject: `[Mediko] New contact message #${id} — ${full_name}`,
     html: `
       <h3 style="color: #2c3e50;">New contact message</h3>
@@ -996,11 +1208,7 @@ async function sendReturnEmails(returnReq, files, metadataStr) {
 
   const adminMail = {
     from: `"Mediko Gateway" <${process.env.MAIL_FROM}>`,
-    to: process.env.ADMIN_EMAIL,
-    cc:
-      process.env.ADMIN_CC && process.env.ADMIN_CC.trim() !== ""
-        ? process.env.ADMIN_CC.split(",")
-        : [],
+    ...adminRecipients(),
     subject: `[Mediko] New return request #${id} — ${full_name}`,
     attachments,
     html: `
@@ -1672,7 +1880,7 @@ app.patch("/api/submissions/:id/status", async (req, res) => {
 
     // Approving a pending row: create the Shopify discount.
     if (status === "approved" && applicant.status !== "approved") {
-      if (!DISCOUNT_AUTOGEN_ENABLED) {
+      if (!getSetting("discount_autogen_enabled")) {
         await queryAsync(
           `UPDATE applications
             SET status = 'approved', rejection_reason = NULL
@@ -2401,7 +2609,6 @@ app.patch("/api/return-requests/:id/status", requireAdmin, async (req, res) => {
 // addresses stay private), sent sequentially in the background with a small
 // delay so the Brevo relay isn't flooded. Every recipient is a row, so the
 // portal can show progress and a blast cut short by a restart can be resumed.
-const BLAST_SEND_DELAY_MS = Math.max(0, parseInt(process.env.BLAST_SEND_DELAY_MS, 10) || 300);
 const BLAST_MAX_RECIPIENTS = 5000;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
@@ -2641,8 +2848,9 @@ async function runBlast(blastId, baseUrl) {
           );
         }
 
-        if (BLAST_SEND_DELAY_MS) {
-          await new Promise((resolve) => setTimeout(resolve, BLAST_SEND_DELAY_MS));
+        const delayMs = getSetting("email_blast_delay_ms");
+        if (delayMs) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
         }
       }
     }
@@ -2943,6 +3151,835 @@ app.post("/api/unsubscribe", express.urlencoded({ extended: false }), async (req
   } catch (err) {
     log("error", "blast_unsubscribe_failed", { message: err.message });
     res.status(500).send(unsubscribePage("Something went wrong", "Please try again later."));
+  }
+});
+
+// ── SMS shipping notifications (Semaphore) ────────────────────────────────────
+// Shopify fires fulfillments/create when an order ships. We verify the HMAC,
+// claim the fulfillment in sms_notifications (unique key = no double texts on
+// webhook retries), answer 200 right away, then text the customer through
+// Semaphore. Outcome of every attempt is recorded on the row.
+//
+// The Semaphore API key is a secret, so it comes only from SEMAPHORE_API_KEY in
+// .env. On/off and sender name are portal settings (see SETTINGS).
+const SEMAPHORE_BASE = "https://api.semaphore.co/api/v4";
+const SMS_MAX_LEN = 160; // one Semaphore credit per 160 GSM characters
+
+function getSmsConfig() {
+  return {
+    apiKey: process.env.SEMAPHORE_API_KEY || "",
+    senderName: getSetting("sms_sender_name"),
+    enabled: getSetting("sms_shipping_enabled"),
+  };
+}
+
+function smsShippingEnabled() {
+  const c = getSmsConfig();
+  return c.enabled && Boolean(c.apiKey);
+}
+
+async function ensureSmsTable() {
+  try {
+    await queryAsync(
+      `CREATE TABLE IF NOT EXISTS sms_notifications (
+         id INT AUTO_INCREMENT PRIMARY KEY,
+         fulfillment_id BIGINT NOT NULL,
+         order_id BIGINT NULL,
+         order_name VARCHAR(64) NULL,
+         tracking_company VARCHAR(120) NULL,
+         tracking_number VARCHAR(120) NULL,
+         tracking_url TEXT NULL,
+         phone VARCHAR(16) NULL,
+         message TEXT NULL,
+         status ENUM('queued','sent','failed','skipped') NOT NULL DEFAULT 'queued',
+         provider_message_id VARCHAR(64) NULL,
+         error TEXT NULL,
+         attempts INT NOT NULL DEFAULT 0,
+         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+         sent_at DATETIME NULL,
+         UNIQUE KEY uniq_sms_fulfillment (fulfillment_id),
+         INDEX idx_sms_status (status),
+         INDEX idx_sms_created (created_at)
+       )`,
+    );
+    // Rows created before these columns existed (pre-portal version).
+    ensureColumnFor("sms_notifications", "tracking_company", "VARCHAR(120) NULL");
+    ensureColumnFor("sms_notifications", "tracking_number", "VARCHAR(120) NULL");
+    ensureColumnFor("sms_notifications", "tracking_url", "TEXT NULL");
+    ensureColumnFor("sms_notifications", "attempts", "INT NOT NULL DEFAULT 0");
+    // An earlier build let the portal save the Semaphore key in the DB. Secrets
+    // belong in .env only, so drop any copy that was saved.
+    await queryAsync("DELETE FROM app_settings WHERE setting_key IN ('sms_api_key', 'sms_sender_name', 'sms_enabled')");
+    log("info", "migration_sms_tables_ready");
+  } catch (err) {
+    log("error", "migration_sms_tables_failed", { message: err.message });
+  }
+}
+
+function verifyShopifyWebhook(rawBody, hmacHeader) {
+  // App-config webhooks are signed with the app's client secret; webhooks
+  // created in Shopify admin (Settings → Notifications) use their own key.
+  const secret = process.env.SHOPIFY_WEBHOOK_SECRET || process.env.SHOPIFY_CLIENT_SECRET;
+  if (!secret || !hmacHeader || !Buffer.isBuffer(rawBody)) return false;
+  const expected = crypto.createHmac("sha256", secret).update(rawBody).digest();
+  const given = Buffer.from(String(hmacHeader), "base64");
+  return given.length === expected.length && crypto.timingSafeEqual(given, expected);
+}
+
+// Accepts 09XXXXXXXXX, +639XXXXXXXXX, 639XXXXXXXXX, 9XXXXXXXXX (with spaces,
+// dashes, parens). Returns 639XXXXXXXXX or null for anything not a PH mobile.
+function normalizePhMobile(raw) {
+  let d = String(raw || "").replace(/\D/g, "");
+  if (d.length === 11 && d.startsWith("09")) d = `63${d.slice(1)}`;
+  else if (d.length === 10 && d.startsWith("9")) d = `63${d}`;
+  return /^639\d{9}$/.test(d) ? d : null;
+}
+
+// Keep messages plain ASCII: any non-GSM character switches the SMS to UCS-2,
+// which cuts a credit down to 70 characters.
+function toSmsText(str) {
+  return String(str || "")
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^\x20-\x7E]/g, "")
+    .trim();
+}
+
+function buildShippingSms({ orderName, company, trackingNumber, trackingUrl }) {
+  let msg = `Mediko: Your order ${orderName} has shipped`;
+  if (company) msg += ` via ${company}`;
+  msg += ".";
+  if (trackingNumber) msg += ` Tracking no: ${trackingNumber}.`;
+  const withUrl = trackingUrl ? `${msg} Track: ${trackingUrl}` : msg;
+  // Drop the link rather than pay for a second credit.
+  const out = withUrl.length <= SMS_MAX_LEN ? withUrl : msg;
+  return toSmsText(out.length <= SMS_MAX_LEN ? out : out.slice(0, SMS_MAX_LEN));
+}
+
+async function lookupOrderPhone(orderId) {
+  if (!shopifyConfigured() || !orderId) return null;
+  const data = await shopifyGraphQL(
+    `query OrderPhones($id: ID!) {
+       order(id: $id) {
+         name
+         phone
+         shippingAddress { phone }
+         billingAddress { phone }
+         customer { defaultPhoneNumber { phoneNumber } }
+       }
+     }`,
+    { id: `gid://shopify/Order/${orderId}` },
+  );
+  const o = data && data.order;
+  if (!o) return null;
+  const candidates = [
+    o.shippingAddress && o.shippingAddress.phone,
+    o.phone,
+    o.billingAddress && o.billingAddress.phone,
+    o.customer && o.customer.defaultPhoneNumber && o.customer.defaultPhoneNumber.phoneNumber,
+  ];
+  for (const c of candidates) {
+    const n = normalizePhMobile(c);
+    if (n) return n;
+  }
+  return null;
+}
+
+async function semaphoreRequest(path, { method = "GET", params = {}, apiKey } = {}) {
+  const body = new URLSearchParams({ apikey: apiKey || getSmsConfig().apiKey, ...params });
+  const url = method === "GET" ? `${SEMAPHORE_BASE}${path}?${body}` : `${SEMAPHORE_BASE}${path}`;
+  const res = await fetch(url, {
+    method,
+    headers: method === "GET" ? {} : { "Content-Type": "application/x-www-form-urlencoded" },
+    body: method === "GET" ? undefined : body,
+    signal: AbortSignal.timeout(15000),
+  });
+  const text = await res.text();
+  let json = null;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    /* non-JSON error body */
+  }
+  if (!res.ok || json === null) {
+    // Never echo the key back into logs or the UI.
+    throw new Error(`Semaphore ${res.status}: ${text.slice(0, 300)}`);
+  }
+  return json;
+}
+
+async function sendSemaphoreSms(number, message) {
+  const { senderName } = getSmsConfig();
+  const params = { number, message };
+  if (senderName) params.sendername = senderName;
+  const json = await semaphoreRequest("/messages", { method: "POST", params });
+  _smsAccountCache.at = 0; // balance changed
+  // Success is an array of message objects; validation errors come back as an
+  // object keyed by field (sometimes with a 200 status).
+  if (!Array.isArray(json) || !json.length) {
+    throw new Error(`Semaphore rejected the message: ${JSON.stringify(json).slice(0, 300)}`);
+  }
+  return json[0];
+}
+
+async function getSemaphoreAccount(apiKey) {
+  const json = await semaphoreRequest("/account", { apiKey });
+  if (!json || json.credit_balance === undefined) {
+    throw new Error(`Semaphore did not accept the API key: ${JSON.stringify(json).slice(0, 200)}`);
+  }
+  return json;
+}
+
+// Sends the text for one sms_notifications row and records the outcome.
+// phoneOverride comes from an admin retry, for orders that had no usable number.
+async function deliverShippingSms(fulfillmentId, { phoneOverride } = {}) {
+  const rows = await queryAsync("SELECT * FROM sms_notifications WHERE fulfillment_id = ?", [fulfillmentId]);
+  const row = rows[0];
+  if (!row) throw new Error("Notification not found");
+  await queryAsync("UPDATE sms_notifications SET attempts = attempts + 1 WHERE id = ?", [row.id]);
+
+  try {
+    let phone = phoneOverride || row.phone;
+    if (!phone) phone = await lookupOrderPhone(row.order_id);
+    if (!phone) {
+      await queryAsync(
+        "UPDATE sms_notifications SET status = 'skipped', error = 'No valid PH mobile number on the order' WHERE id = ?",
+        [row.id],
+      );
+      log("warn", "sms_skipped_no_phone", { fulfillmentId, orderName: row.order_name });
+      return { status: "skipped" };
+    }
+
+    const message = buildShippingSms({
+      orderName: row.order_name,
+      company: row.tracking_company,
+      trackingNumber: row.tracking_number,
+      trackingUrl: row.tracking_url,
+    });
+    const sent = await sendSemaphoreSms(phone, message);
+    await queryAsync(
+      "UPDATE sms_notifications SET status = 'sent', phone = ?, message = ?, provider_message_id = ?, error = NULL, sent_at = NOW() WHERE id = ?",
+      [phone, message, sent.message_id ? String(sent.message_id) : null, row.id],
+    );
+    log("info", "sms_sent", { fulfillmentId, orderName: row.order_name, messageId: sent.message_id });
+    return { status: "sent" };
+  } catch (err) {
+    log("error", "sms_send_failed", { fulfillmentId, orderName: row.order_name, message: err.message });
+    await queryAsync("UPDATE sms_notifications SET status = 'failed', error = ? WHERE id = ?", [
+      err.message.slice(0, 1000),
+      row.id,
+    ]).catch(() => {});
+    return { status: "failed", error: err.message };
+  }
+}
+
+async function handleFulfillmentCreateWebhook(req, res) {
+  if (!verifyShopifyWebhook(req.body, req.get("X-Shopify-Hmac-Sha256"))) {
+    log("warn", "sms_webhook_bad_hmac", { ip: req.ip });
+    return res.status(401).send("Unauthorized");
+  }
+  if (req.get("X-Shopify-Topic") !== "fulfillments/create") return res.status(200).send("ignored");
+  if (!smsShippingEnabled()) return res.status(200).send("sms disabled");
+
+  let f;
+  try {
+    f = JSON.parse(req.body.toString("utf8"));
+  } catch {
+    return res.status(400).send("Bad JSON");
+  }
+  if (!f || !f.id) return res.status(400).send("Missing fulfillment id");
+
+  // Third-party fulfillment services can create pending/failed fulfillments;
+  // only a successful one means the parcel is actually on its way.
+  if (f.status && f.status !== "success") {
+    log("info", "sms_skipped_status", { fulfillmentId: f.id, status: f.status });
+    return res.status(200).send("skipped");
+  }
+
+  const orderName = toSmsText(String(f.name || "").split(".")[0]) || `#${f.order_id}`;
+  let claimed;
+  try {
+    const result = await queryAsync(
+      `INSERT IGNORE INTO sms_notifications
+         (fulfillment_id, order_id, order_name, tracking_company, tracking_number, tracking_url, phone)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        f.id,
+        f.order_id || null,
+        orderName,
+        toSmsText(f.tracking_company).slice(0, 120) || null,
+        toSmsText(f.tracking_number || (f.tracking_numbers || [])[0]).slice(0, 120) || null,
+        f.tracking_url || (f.tracking_urls || [])[0] || null,
+        normalizePhMobile(f.destination && f.destination.phone),
+      ],
+    );
+    claimed = result.affectedRows === 1;
+  } catch (err) {
+    log("error", "sms_claim_failed", { fulfillmentId: f.id, message: err.message });
+    // 500 lets Shopify retry later, once the DB is back.
+    return res.status(500).send("DB error");
+  }
+
+  res.status(200).send("ok");
+  if (!claimed) {
+    log("info", "sms_duplicate_webhook", { fulfillmentId: f.id });
+    return;
+  }
+  deliverShippingSms(f.id).catch((err) =>
+    log("error", "sms_deliver_crashed", { fulfillmentId: f.id, message: err.message }),
+  );
+}
+
+// ── /api/sms/* (admin) ────────────────────────────────────────────────────────
+// Read-only status for the SMS tabs. Editing happens in /api/settings; the key
+// is reported only as set or missing.
+app.get("/api/sms/settings", requireAdmin, (req, res) => {
+  const c = getSmsConfig();
+  res.json({
+    enabled: c.enabled,
+    senderName: c.senderName,
+    apiKeySet: Boolean(c.apiKey),
+    webhookUrl: `${publicBaseUrl(req)}/webhooks/shopify/fulfillments-create`,
+    webhookSecretSet: Boolean(process.env.SHOPIFY_WEBHOOK_SECRET || process.env.SHOPIFY_CLIENT_SECRET),
+  });
+});
+
+// Semaphore rate-limits /account hard, so the balance is cached briefly.
+let _smsAccountCache = { key: null, at: 0, data: null };
+const SMS_ACCOUNT_CACHE_MS = 60 * 1000;
+
+app.get("/api/sms/account", requireAdmin, async (_req, res) => {
+  const { apiKey } = getSmsConfig();
+  if (!apiKey) return res.status(503).json({ error: "No Semaphore API key set." });
+  const c = _smsAccountCache;
+  if (c.key === apiKey && c.data && Date.now() - c.at < SMS_ACCOUNT_CACHE_MS) return res.json(c.data);
+  try {
+    const a = await getSemaphoreAccount();
+    const data = { accountName: a.account_name, status: a.status, creditBalance: a.credit_balance };
+    _smsAccountCache = { key: apiKey, at: Date.now(), data };
+    res.json(data);
+  } catch (err) {
+    log("error", "sms_account_failed", { message: err.message });
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.get("/api/sms/notifications", requireAdmin, async (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+  const offset = (page - 1) * limit;
+  const where = [];
+  const params = [];
+  if (["queued", "sent", "failed", "skipped"].includes(req.query.status)) {
+    where.push("status = ?");
+    params.push(req.query.status);
+  }
+  if (req.query.search) {
+    where.push("(order_name LIKE ? OR phone LIKE ? OR tracking_number LIKE ?)");
+    const term = `%${String(req.query.search).trim()}%`;
+    params.push(term, term, term);
+  }
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  try {
+    const [{ total }] = await queryAsync(`SELECT COUNT(*) AS total FROM sms_notifications ${whereSql}`, params);
+    const data = await queryAsync(
+      `SELECT id, fulfillment_id, order_id, order_name, tracking_company, tracking_number, phone, message,
+              status, error, attempts, created_at, sent_at
+       FROM sms_notifications ${whereSql} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+      [...params, limit, offset],
+    );
+    const counts = await queryAsync("SELECT status, COUNT(*) AS c FROM sms_notifications GROUP BY status");
+    res.json({
+      metadata: { total_items: total, total_pages: Math.ceil(total / limit) || 1, current_page: page },
+      counts: Object.fromEntries(counts.map((r) => [r.status, r.c])),
+      data,
+    });
+  } catch (err) {
+    log("error", "sms_list_failed", { message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/sms/notifications/:id/retry", requireAdmin, async (req, res) => {
+  if (!getSmsConfig().apiKey) return res.status(503).json({ error: "No Semaphore API key set." });
+  let phoneOverride;
+  if (req.body && req.body.phone) {
+    phoneOverride = normalizePhMobile(req.body.phone);
+    if (!phoneOverride) return res.status(400).json({ error: "Enter a valid PH mobile number." });
+  }
+  try {
+    const rows = await queryAsync("SELECT fulfillment_id, status FROM sms_notifications WHERE id = ?", [
+      req.params.id,
+    ]);
+    if (!rows.length) return res.status(404).json({ error: "Not found." });
+    if (rows[0].status === "sent" || rows[0].status === "queued") {
+      return res.status(409).json({ error: `This message is already ${rows[0].status}.` });
+    }
+    const result = await deliverShippingSms(rows[0].fulfillment_id, { phoneOverride });
+    log("info", "sms_retry", { id: req.params.id, result: result.status, ip: req.ip });
+    if (result.status === "sent") return res.json({ success: true, status: "sent" });
+    res.status(502).json({ error: result.error || "No valid PH mobile number on the order.", status: result.status });
+  } catch (err) {
+    log("error", "sms_retry_failed", { id: req.params.id, message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Send one test SMS to confirm the key / sender name.
+app.post("/api/sms/test", requireAdmin, async (req, res) => {
+  if (!getSmsConfig().apiKey) return res.status(503).json({ error: "No Semaphore API key set." });
+  const number = normalizePhMobile(req.body && req.body.number);
+  if (!number) return res.status(400).json({ error: "Enter a valid PH mobile number." });
+  try {
+    const sent = await sendSemaphoreSms(
+      number,
+      buildShippingSms({ orderName: "#TEST", company: "J&T Express", trackingNumber: "000000000" }),
+    );
+    log("info", "sms_test_sent", { messageId: sent.message_id, ip: req.ip });
+    res.json({ success: true, messageId: sent.message_id, status: sent.status, sender: sent.sender_name });
+  } catch (err) {
+    log("error", "sms_test_failed", { message: err.message });
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ── SMS blasts ────────────────────────────────────────────────────────────────
+// Same shape as email blasts: audience from the form tables (by status) plus
+// pasted numbers, one row per recipient, sent one by one in-process, with
+// resume/cancel. Numbers on sms_optouts are never texted. Promotional SMS needs
+// the customer's consent (Data Privacy Act), so the opt-out list is the
+// admin's tool for honouring "please stop" requests.
+const SMS_BLAST_MAX_RECIPIENTS = 5000;
+const SMS_BLAST_MAX_LEN = 459; // 3 concatenated SMS
+const runningSmsBlasts = new Map();
+
+async function ensureSmsBlastTables() {
+  try {
+    await queryAsync(
+      `CREATE TABLE IF NOT EXISTS sms_blasts (
+         id INT AUTO_INCREMENT PRIMARY KEY,
+         title VARCHAR(120) NOT NULL,
+         body TEXT NOT NULL,
+         audience TEXT,
+         status ENUM('sending','completed','interrupted','cancelled') NOT NULL DEFAULT 'sending',
+         total INT NOT NULL DEFAULT 0,
+         created_by VARCHAR(120) NULL,
+         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+         finished_at DATETIME NULL,
+         INDEX idx_sms_blasts_created (created_at)
+       )`,
+    );
+    await queryAsync(
+      `CREATE TABLE IF NOT EXISTS sms_blast_recipients (
+         id INT AUTO_INCREMENT PRIMARY KEY,
+         blast_id INT NOT NULL,
+         phone VARCHAR(16) NOT NULL,
+         full_name VARCHAR(255) NULL,
+         status ENUM('queued','sent','failed','skipped') NOT NULL DEFAULT 'queued',
+         provider_message_id VARCHAR(64) NULL,
+         error TEXT NULL,
+         sent_at DATETIME NULL,
+         UNIQUE KEY uniq_sms_blast_phone (blast_id, phone),
+         INDEX idx_sms_blast_status (blast_id, status)
+       )`,
+    );
+    await queryAsync(
+      `CREATE TABLE IF NOT EXISTS sms_optouts (
+         phone VARCHAR(16) PRIMARY KEY,
+         note VARCHAR(255) NULL,
+         created_by VARCHAR(120) NULL,
+         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+       )`,
+    );
+    const result = await queryAsync("UPDATE sms_blasts SET status = 'interrupted' WHERE status = 'sending'");
+    if (result.affectedRows) log("warn", "sms_blasts_interrupted_on_boot", { count: result.affectedRows });
+    log("info", "migration_sms_blast_tables_ready");
+  } catch (err) {
+    log("error", "migration_sms_blast_tables_failed", { message: err.message });
+  }
+}
+
+// Numbers are pasted one per line or comma/semicolon separated. Unlike email,
+// spaces can't be separators: "0917 123 4567" is one number.
+function normalizeSmsAudience(raw) {
+  const input = raw && typeof raw === "object" ? raw : {};
+  const audience = {};
+  for (const [source, { statuses }] of Object.entries(BLAST_SOURCES)) {
+    const picked = Array.isArray(input[source]) ? input[source] : [];
+    audience[source] = [...new Set(picked.filter((s) => statuses.includes(s)))];
+  }
+  audience.extra = String(input.extra || "")
+    .split(/[\n,;]+/)
+    .map((e) => e.trim())
+    .filter(Boolean);
+  return audience;
+}
+
+async function resolveSmsAudience(audience) {
+  const byPhone = new Map();
+  const invalid = [];
+  const add = (raw, fullName) => {
+    const phone = normalizePhMobile(raw);
+    if (!phone) {
+      invalid.push(String(raw || "").trim());
+      return;
+    }
+    if (!byPhone.has(phone)) byPhone.set(phone, { phone, full_name: fullName || null });
+  };
+
+  for (const [source, { table }] of Object.entries(BLAST_SOURCES)) {
+    if (!audience[source].length) continue;
+    const rows = await queryAsync(
+      `SELECT contact_number, full_name FROM ${table} WHERE status IN (?) ORDER BY created_at DESC`,
+      [audience[source]],
+    );
+    rows.forEach((r) => add(r.contact_number, r.full_name));
+  }
+  audience.extra.forEach((p) => add(p, null));
+
+  let optedOut = 0;
+  if (byPhone.size) {
+    const rows = await queryAsync("SELECT phone FROM sms_optouts WHERE phone IN (?)", [[...byPhone.keys()]]);
+    rows.forEach((r) => byPhone.delete(r.phone));
+    optedOut = rows.length;
+  }
+  return { recipients: [...byPhone.values()], invalid, optedOut };
+}
+
+// Credits per message: 1 for ≤160 chars, then 153 per part. A few ASCII
+// characters take two GSM slots.
+function smsSegments(text) {
+  const len = [...text].reduce((n, ch) => n + ("^{}\\[]~|".includes(ch) ? 2 : 1), 0);
+  return len <= 160 ? 1 : Math.ceil(len / 153);
+}
+
+function fillSmsBlast(body, recipient) {
+  const first = toSmsText(String(recipient.full_name || "").trim().split(/\s+/)[0]) || "there";
+  return toSmsText(body.replace(/\{\{\s*name\s*\}\}/gi, first));
+}
+
+function validateSmsBlastContent(body) {
+  const title = typeof body?.title === "string" ? body.title.trim() : "";
+  // Strip non-GSM characters up front so the admin's preview matches what's sent.
+  const text = typeof body?.body === "string" ? toSmsText(body.body.replace(/\r?\n/g, " ")) : "";
+  if (title.length < 3 || title.length > 120) return { error: "Title must be 3–120 characters." };
+  if (text.length < 5 || text.length > SMS_BLAST_MAX_LEN) {
+    return { error: `Message must be 5–${SMS_BLAST_MAX_LEN} characters (up to 3 SMS).` };
+  }
+  // Semaphore silently drops messages that start with "TEST".
+  if (/^test/i.test(text)) return { error: "Semaphore ignores messages starting with \"TEST\". Reword the start." };
+  return { title, text };
+}
+
+async function runSmsBlast(blastId) {
+  if (runningSmsBlasts.has(blastId)) return;
+  const state = { cancelled: false };
+  runningSmsBlasts.set(blastId, state);
+
+  try {
+    const [blast] = await queryAsync("SELECT * FROM sms_blasts WHERE id = ?", [blastId]);
+    if (!blast) return;
+    await queryAsync("UPDATE sms_blasts SET status = 'sending', finished_at = NULL WHERE id = ?", [blastId]);
+    log("info", "sms_blast_started", { blastId, total: blast.total });
+
+    while (!state.cancelled) {
+      // Re-check opt-outs per batch so a number added mid-blast is honoured.
+      const batch = await queryAsync(
+        `SELECT r.id, r.phone, r.full_name, o.phone AS opted_out
+         FROM sms_blast_recipients r
+         LEFT JOIN sms_optouts o ON o.phone = r.phone
+         WHERE r.blast_id = ? AND r.status = 'queued'
+         ORDER BY r.id LIMIT 50`,
+        [blastId],
+      );
+      if (!batch.length) break;
+
+      for (const recipient of batch) {
+        if (state.cancelled) break;
+        if (recipient.opted_out) {
+          await queryAsync(
+            "UPDATE sms_blast_recipients SET status = 'skipped', error = 'opted out' WHERE id = ?",
+            [recipient.id],
+          );
+          continue;
+        }
+        try {
+          const sent = await sendSemaphoreSms(recipient.phone, fillSmsBlast(blast.body, recipient));
+          await queryAsync(
+            "UPDATE sms_blast_recipients SET status = 'sent', provider_message_id = ?, sent_at = NOW(), error = NULL WHERE id = ?",
+            [sent.message_id ? String(sent.message_id) : null, recipient.id],
+          );
+        } catch (err) {
+          log("warn", "sms_blast_recipient_failed", { blastId, recipientId: recipient.id, message: err.message });
+          await queryAsync("UPDATE sms_blast_recipients SET status = 'failed', error = ? WHERE id = ?", [
+            err.message.slice(0, 1000),
+            recipient.id,
+          ]);
+        }
+        const delayMs = getSetting("sms_blast_delay_ms");
+        if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+      }
+    }
+
+    if (state.cancelled) {
+      await queryAsync(
+        "UPDATE sms_blast_recipients SET status = 'skipped', error = 'cancelled' WHERE blast_id = ? AND status = 'queued'",
+        [blastId],
+      );
+    }
+    await queryAsync("UPDATE sms_blasts SET status = ?, finished_at = NOW() WHERE id = ?", [
+      state.cancelled ? "cancelled" : "completed",
+      blastId,
+    ]);
+    log("info", state.cancelled ? "sms_blast_cancelled" : "sms_blast_completed", { blastId });
+  } catch (err) {
+    log("error", "sms_blast_run_failed", { blastId, message: err.message });
+    await queryAsync("UPDATE sms_blasts SET status = 'interrupted' WHERE id = ? AND status = 'sending'", [
+      blastId,
+    ]).catch(() => {});
+  } finally {
+    runningSmsBlasts.delete(blastId);
+  }
+}
+
+const SMS_BLAST_COUNTS_SQL = `
+  SELECT blast_id,
+         SUM(status = 'queued') AS queued,
+         SUM(status = 'sent') AS sent,
+         SUM(status = 'failed') AS failed,
+         SUM(status = 'skipped') AS skipped
+  FROM sms_blast_recipients`;
+
+function parseId(req, res) {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id) || id < 1) {
+    res.status(400).json({ error: "Invalid id" });
+    return null;
+  }
+  return id;
+}
+
+app.post("/api/sms-blasts/preview", requireAdmin, async (req, res) => {
+  try {
+    const audience = normalizeSmsAudience(req.body?.audience);
+    const { recipients, invalid, optedOut } = await resolveSmsAudience(audience);
+    res.json({
+      total: recipients.length,
+      optedOut,
+      invalid,
+      max: SMS_BLAST_MAX_RECIPIENTS,
+      sample: recipients.slice(0, 10),
+    });
+  } catch (err) {
+    log("error", "sms_blast_preview_failed", { message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/sms-blasts/test", requireAdmin, async (req, res) => {
+  if (!getSmsConfig().apiKey) return res.status(503).json({ error: "No Semaphore API key set." });
+  const content = validateSmsBlastContent(req.body);
+  if (content.error) return res.status(400).json({ error: content.error });
+  const to = normalizePhMobile(req.body?.to);
+  if (!to) return res.status(400).json({ error: "Enter a valid PH mobile number for the test." });
+  try {
+    const sent = await sendSemaphoreSms(to, fillSmsBlast(content.text, { full_name: "Juan" }));
+    log("info", "sms_blast_test_sent", { messageId: sent.message_id, ip: req.ip });
+    res.json({ success: true });
+  } catch (err) {
+    log("error", "sms_blast_test_failed", { message: err.message });
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.post("/api/sms-blasts", requireAdmin, async (req, res) => {
+  if (!getSmsConfig().apiKey) return res.status(503).json({ error: "No Semaphore API key set." });
+  const content = validateSmsBlastContent(req.body);
+  if (content.error) return res.status(400).json({ error: content.error });
+
+  try {
+    const audience = normalizeSmsAudience(req.body?.audience);
+    const { recipients } = await resolveSmsAudience(audience);
+    if (!recipients.length) return res.status(400).json({ error: "The selected audience has no recipients." });
+    if (recipients.length > SMS_BLAST_MAX_RECIPIENTS) {
+      return res.status(400).json({
+        error: `Audience has ${recipients.length} recipients; the limit is ${SMS_BLAST_MAX_RECIPIENTS}.`,
+      });
+    }
+    const expected = parseInt(req.body?.expected_total, 10);
+    if (Number.isInteger(expected) && expected !== recipients.length) {
+      return res.status(409).json({
+        error: `Audience changed: now ${recipients.length} recipients (you confirmed ${expected}). Recount and try again.`,
+      });
+    }
+    const recent = await queryAsync(
+      "SELECT id FROM sms_blasts WHERE title = ? AND created_at >= NOW() - INTERVAL 2 MINUTE",
+      [content.title],
+    );
+    if (recent.length) {
+      return res.status(409).json({ error: "A blast with this title was just sent. Wait 2 minutes to resend." });
+    }
+
+    const result = await queryAsync(
+      "INSERT INTO sms_blasts (title, body, audience, total, created_by) VALUES (?, ?, ?, ?, ?)",
+      [content.title, content.text, JSON.stringify(audience), recipients.length, adminName(req)],
+    );
+    const blastId = result.insertId;
+    for (let i = 0; i < recipients.length; i += 500) {
+      const chunk = recipients.slice(i, i + 500).map((r) => [blastId, r.phone, r.full_name]);
+      await queryAsync("INSERT INTO sms_blast_recipients (blast_id, phone, full_name) VALUES ?", [chunk]);
+    }
+
+    log("info", "sms_blast_created", { blastId, total: recipients.length, ip: req.ip });
+    res.status(202).json({ success: true, id: blastId, total: recipients.length });
+    runSmsBlast(blastId);
+  } catch (err) {
+    log("error", "sms_blast_create_failed", { message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/sms-blasts", requireAdmin, async (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
+  const offset = (page - 1) * limit;
+  try {
+    const [{ total }] = await queryAsync("SELECT COUNT(*) AS total FROM sms_blasts");
+    const data = await queryAsync(
+      `SELECT b.id, b.title, b.status, b.total, b.created_by, b.created_at, b.finished_at,
+              COALESCE(c.queued, 0) AS queued, COALESCE(c.sent, 0) AS sent,
+              COALESCE(c.failed, 0) AS failed, COALESCE(c.skipped, 0) AS skipped
+       FROM sms_blasts b
+       LEFT JOIN (${SMS_BLAST_COUNTS_SQL} GROUP BY blast_id) c ON c.blast_id = b.id
+       ORDER BY b.created_at DESC LIMIT ? OFFSET ?`,
+      [limit, offset],
+    );
+    res.json({
+      metadata: { total_items: total, total_pages: Math.ceil(total / limit) || 1, current_page: page },
+      data,
+    });
+  } catch (err) {
+    log("error", "sms_blast_list_failed", { message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/sms-blasts/:id", requireAdmin, async (req, res) => {
+  const id = parseId(req, res);
+  if (!id) return;
+  try {
+    const [blast] = await queryAsync("SELECT * FROM sms_blasts WHERE id = ?", [id]);
+    if (!blast) return res.status(404).json({ error: "Blast not found" });
+    const [counts] = await queryAsync(`${SMS_BLAST_COUNTS_SQL} WHERE blast_id = ? GROUP BY blast_id`, [id]);
+    const failures = await queryAsync(
+      `SELECT phone, full_name, status, error FROM sms_blast_recipients
+       WHERE blast_id = ? AND status IN ('failed', 'skipped') ORDER BY id LIMIT 200`,
+      [id],
+    );
+    res.json({
+      ...blast,
+      queued: Number(counts?.queued || 0),
+      sent: Number(counts?.sent || 0),
+      failed: Number(counts?.failed || 0),
+      skipped: Number(counts?.skipped || 0),
+      failures,
+    });
+  } catch (err) {
+    log("error", "sms_blast_get_failed", { id, message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/sms-blasts/:id/resume", requireAdmin, async (req, res) => {
+  const id = parseId(req, res);
+  if (!id) return;
+  try {
+    const [blast] = await queryAsync("SELECT status FROM sms_blasts WHERE id = ?", [id]);
+    if (!blast) return res.status(404).json({ error: "Blast not found" });
+    if (blast.status !== "interrupted" || runningSmsBlasts.has(id)) {
+      return res.status(409).json({ error: `Blast is ${blast.status}; only interrupted blasts can resume.` });
+    }
+    log("info", "sms_blast_resumed", { blastId: id, ip: req.ip });
+    res.json({ success: true, id });
+    runSmsBlast(id);
+  } catch (err) {
+    log("error", "sms_blast_resume_failed", { id, message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/sms-blasts/:id/cancel", requireAdmin, async (req, res) => {
+  const id = parseId(req, res);
+  if (!id) return;
+  try {
+    const running = runningSmsBlasts.get(id);
+    if (running) {
+      running.cancelled = true;
+    } else {
+      const result = await queryAsync(
+        "UPDATE sms_blasts SET status = 'cancelled', finished_at = NOW() WHERE id = ? AND status = 'interrupted'",
+        [id],
+      );
+      if (!result.affectedRows) {
+        return res.status(409).json({ error: "Only sending or interrupted blasts can be cancelled." });
+      }
+      await queryAsync(
+        "UPDATE sms_blast_recipients SET status = 'skipped', error = 'cancelled' WHERE blast_id = ? AND status = 'queued'",
+        [id],
+      );
+    }
+    log("info", "sms_blast_cancel_requested", { blastId: id, ip: req.ip });
+    res.json({ success: true, id });
+  } catch (err) {
+    log("error", "sms_blast_cancel_failed", { id, message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── /api/sms-optouts (admin) ──────────────────────────────────────────────────
+app.get("/api/sms-optouts", requireAdmin, async (_req, res) => {
+  try {
+    const data = await queryAsync(
+      "SELECT phone, note, created_by, created_at FROM sms_optouts ORDER BY created_at DESC LIMIT 1000",
+    );
+    res.json({ data });
+  } catch (err) {
+    log("error", "sms_optout_list_failed", { message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/sms-optouts", requireAdmin, async (req, res) => {
+  const phones = String(req.body?.phones || "")
+    .split(/[\n,;]+/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  const valid = [...new Set(phones.map(normalizePhMobile).filter(Boolean))];
+  const invalid = phones.filter((p) => !normalizePhMobile(p));
+  if (!valid.length) return res.status(400).json({ error: "No valid PH mobile numbers.", invalid });
+  const note = String(req.body?.note || "").trim().slice(0, 255) || null;
+  try {
+    await queryAsync("INSERT IGNORE INTO sms_optouts (phone, note, created_by) VALUES ?", [
+      valid.map((p) => [p, note, adminName(req)]),
+    ]);
+    log("info", "sms_optouts_added", { count: valid.length, ip: req.ip });
+    res.json({ success: true, added: valid.length, invalid });
+  } catch (err) {
+    log("error", "sms_optout_add_failed", { message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/api/sms-optouts/:phone", requireAdmin, async (req, res) => {
+  const phone = normalizePhMobile(req.params.phone);
+  if (!phone) return res.status(400).json({ error: "Invalid number" });
+  try {
+    await queryAsync("DELETE FROM sms_optouts WHERE phone = ?", [phone]);
+    log("info", "sms_optout_removed", { ip: req.ip });
+    res.json({ success: true });
+  } catch (err) {
+    log("error", "sms_optout_remove_failed", { message: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 

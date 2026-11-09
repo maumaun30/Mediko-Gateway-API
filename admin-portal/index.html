@@ -83,6 +83,10 @@
           Requests</button>
         <button data-tab="blast" onclick="setTab('blast')" class="tab-btn px-4 py-2 text-sm font-medium">Email
           Blast</button>
+        <button data-tab="sms" onclick="setTab('sms')" class="tab-btn px-4 py-2 text-sm font-medium">SMS</button>
+        <button data-tab="smsblast" onclick="setTab('smsblast')" class="tab-btn px-4 py-2 text-sm font-medium">SMS
+          Blast</button>
+        <button data-tab="settings" onclick="setTab('settings')" class="tab-btn px-4 py-2 text-sm font-medium">Settings</button>
       </nav>
     </div>
 
@@ -313,6 +317,226 @@
         </table>
       </div>
     </section>
+
+    <!-- ───── SMS panel ───── -->
+    <section data-panel="sms" class="tab-panel hidden">
+      <div class="grid gap-4 lg:grid-cols-5 mb-6">
+        <!-- Status -->
+        <div class="bg-white shadow rounded-lg p-5 lg:col-span-3">
+          <div class="flex items-start justify-between gap-3 mb-1">
+            <h3 class="text-sm font-semibold text-gray-900">Shipping SMS</h3>
+            <span id="sms-state" class="inline-block px-2 py-1 rounded text-xs font-medium bg-gray-200 text-gray-700">…</span>
+          </div>
+          <p class="text-xs text-gray-500 mb-4">
+            Customers get a text from Semaphore when their order is marked fulfilled in Shopify.
+          </p>
+          <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
+            <dt class="text-gray-500">Sending</dt><dd id="sms-enabled-text">—</dd>
+            <dt class="text-gray-500">Sender name</dt><dd id="sms-sender-text">—</dd>
+            <dt class="text-gray-500">API key</dt><dd id="sms-key-text">—</dd>
+          </dl>
+          <button onclick="setTab('settings')" class="mt-4 text-xs text-mediko-blue hover:underline">Change in Settings →</button>
+
+          <div class="mt-5 pt-4 border-t border-gray-100 text-xs text-gray-500 space-y-1">
+            <div>Webhook URL: <code id="sms-webhook-url" class="bg-gray-100 px-1 rounded break-all"></code></div>
+            <div id="sms-webhook-warning" class="text-amber-700 hidden">
+              No webhook secret on the server (SHOPIFY_CLIENT_SECRET or SHOPIFY_WEBHOOK_SECRET), so Shopify webhooks will be rejected.
+            </div>
+          </div>
+        </div>
+
+        <!-- Credits + test -->
+        <div class="bg-white shadow rounded-lg p-5 lg:col-span-2">
+          <h3 class="text-sm font-semibold text-gray-900 mb-1">Credits</h3>
+          <div class="flex items-baseline gap-3 mb-4">
+            <span id="sms-credits" class="text-2xl font-semibold text-gray-900">—</span>
+            <button onclick="loadSmsAccount()" class="text-xs text-mediko-blue hover:underline">Refresh</button>
+          </div>
+          <p id="sms-account-detail" class="text-xs text-gray-500 mb-4"></p>
+
+          <h3 class="text-sm font-semibold text-gray-900 mb-1">Send a test</h3>
+          <p class="text-xs text-gray-500 mb-2">Sends a sample shipping text. Uses 1 credit.</p>
+          <div class="flex gap-2">
+            <input id="sms-test-number" type="tel" placeholder="09XX XXX XXXX"
+              class="flex-1 min-w-0 border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-mediko-blue" />
+            <button id="sms-test-btn" onclick="sendSmsTest()"
+              class="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300 text-sm">Send test</button>
+          </div>
+          <p id="sms-test-message" class="text-xs mt-2 hidden"></p>
+        </div>
+      </div>
+
+      <!-- Log -->
+      <div class="bg-white shadow rounded-lg p-4 mb-4 flex flex-wrap items-end gap-3">
+        <div class="flex-1 min-w-[200px]">
+          <label class="block text-xs font-medium text-gray-600 mb-1">Search</label>
+          <input id="search-sms" type="text" placeholder="Order #, phone, or tracking number"
+            onkeydown="if (event.key === 'Enter') applySmsFilters()"
+            class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Status</label>
+          <select id="status-sms" onchange="applySmsFilters()"
+            class="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400">
+            <option value="">All</option>
+            <option value="sent">Sent</option>
+            <option value="failed">Failed</option>
+            <option value="skipped">Skipped</option>
+            <option value="queued">Queued</option>
+          </select>
+        </div>
+        <button onclick="applySmsFilters()"
+          class="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300 text-sm">Search</button>
+        <div id="sms-counts" class="text-xs text-gray-500 w-full"></div>
+      </div>
+
+      <div id="page-sms" class="text-sm text-gray-500 mb-3 hidden"></div>
+      <div class="bg-white shadow rounded-lg overflow-x-auto">
+        <table class="min-w-full divide-y divide-gray-200">
+          <thead class="bg-gray-100">
+            <tr>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Order</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Phone</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Message</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="body-sms" class="divide-y divide-gray-200"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ───── SMS blast panel ───── -->
+    <section data-panel="smsblast" class="tab-panel hidden">
+      <div class="bg-amber-50 border border-amber-200 text-amber-800 text-xs rounded p-3 mb-4">
+        Only text people who agreed to hear from Mediko. Add anyone who asks to stop to the opt-out list below — they are never texted again.
+        <span id="smsb-sender-note"></span>
+      </div>
+      <div class="grid gap-4 lg:grid-cols-5 mb-6">
+        <div class="bg-white shadow rounded-lg p-5 lg:col-span-2">
+          <h3 class="text-sm font-semibold text-gray-900 mb-1">1. Audience</h3>
+          <p class="text-xs text-gray-500 mb-4">Uses the mobile number on each submission. Duplicates, invalid and opted-out numbers are removed.</p>
+          <div class="space-y-4" onchange="markSmsAudienceDirty()">
+            <fieldset>
+              <legend class="text-xs font-medium text-gray-600 mb-1">Applications</legend>
+              <div class="flex flex-wrap gap-x-4 gap-y-1 text-sm text-gray-700">
+                <label class="flex items-center gap-2"><input type="checkbox" data-source="applications" value="approved"> Approved</label>
+                <label class="flex items-center gap-2"><input type="checkbox" data-source="applications" value="pending"> Pending</label>
+                <label class="flex items-center gap-2"><input type="checkbox" data-source="applications" value="rejected"> Rejected</label>
+              </div>
+            </fieldset>
+            <fieldset>
+              <legend class="text-xs font-medium text-gray-600 mb-1">Contact messages</legend>
+              <div class="flex flex-wrap gap-x-4 gap-y-1 text-sm text-gray-700">
+                <label class="flex items-center gap-2"><input type="checkbox" data-source="contact" value="pending"> Pending</label>
+                <label class="flex items-center gap-2"><input type="checkbox" data-source="contact" value="resolved"> Resolved</label>
+              </div>
+            </fieldset>
+            <fieldset>
+              <legend class="text-xs font-medium text-gray-600 mb-1">Return requests</legend>
+              <div class="flex flex-wrap gap-x-4 gap-y-1 text-sm text-gray-700">
+                <label class="flex items-center gap-2"><input type="checkbox" data-source="returns" value="approved"> Approved</label>
+                <label class="flex items-center gap-2"><input type="checkbox" data-source="returns" value="pending"> Pending</label>
+                <label class="flex items-center gap-2"><input type="checkbox" data-source="returns" value="rejected"> Rejected</label>
+              </div>
+            </fieldset>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Extra numbers</label>
+              <textarea id="smsb-extra" rows="3" oninput="markSmsAudienceDirty()"
+                placeholder="One per line, or separated by commas"
+                class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-mediko-blue resize-y"></textarea>
+            </div>
+          </div>
+          <button id="smsb-count-btn" onclick="countSmsAudience()"
+            class="mt-4 bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300 text-sm">Count recipients</button>
+          <div id="smsb-audience-result" class="mt-3 text-sm text-gray-600"></div>
+        </div>
+
+        <div class="bg-white shadow rounded-lg p-5 lg:col-span-3">
+          <h3 class="text-sm font-semibold text-gray-900 mb-1">2. Message</h3>
+          <p class="text-xs text-gray-500 mb-4">
+            Plain text, one paragraph. <code class="bg-gray-100 px-1 rounded">{{name}}</code> becomes the first name (or “there”).
+            Accents and emoji are removed so each text stays at the cheaper rate.
+          </p>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Title (internal, not sent)</label>
+          <input id="smsb-title" type="text" maxlength="120" placeholder="e.g. November vitamin sale"
+            class="w-full border border-gray-300 rounded px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-mediko-blue" />
+          <label class="block text-xs font-medium text-gray-600 mb-1">Message</label>
+          <textarea id="smsb-body" rows="5" maxlength="459" oninput="updateSmsCounter()"
+            placeholder="Mediko: Hi {{name}}! 20% off maintenance meds this week at mediko.ph"
+            class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-mediko-blue resize-y"></textarea>
+          <div id="smsb-counter" class="text-xs text-gray-500 mt-1"></div>
+
+          <div class="mt-4 pt-4 border-t border-gray-100 flex flex-wrap items-end gap-2">
+            <div class="flex-1 min-w-[200px]">
+              <label class="block text-xs font-medium text-gray-600 mb-1">Send a test to</label>
+              <input id="smsb-test-to" type="tel" placeholder="09XX XXX XXXX"
+                class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-mediko-blue" />
+            </div>
+            <button id="smsb-test-btn" onclick="sendSmsBlastTest()"
+              class="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300 text-sm">Send test</button>
+            <button id="smsb-send-btn" onclick="sendSmsBlast()"
+              class="bg-mediko-red text-white px-4 py-2 rounded shadow hover:brightness-110 text-sm">Send blast</button>
+          </div>
+          <p id="smsb-message" class="text-xs mt-2 hidden"></p>
+        </div>
+      </div>
+
+      <h3 class="text-sm font-semibold text-gray-900 mb-2">History</h3>
+      <div id="page-smsblast" class="text-sm text-gray-500 mb-3 hidden"></div>
+      <div class="bg-white shadow rounded-lg overflow-x-auto mb-6">
+        <table class="min-w-full divide-y divide-gray-200">
+          <thead class="bg-gray-100">
+            <tr>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Title</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Started</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Progress</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="body-smsblast" class="divide-y divide-gray-200"></tbody>
+        </table>
+      </div>
+
+      <div class="bg-white shadow rounded-lg p-5">
+        <h3 class="text-sm font-semibold text-gray-900 mb-1">Opt-out list</h3>
+        <p class="text-xs text-gray-500 mb-3">These numbers never get blast texts. Shipping notifications still go out.</p>
+        <div class="flex flex-wrap gap-2 items-end mb-3">
+          <textarea id="smsb-optout-input" rows="1" placeholder="09XX XXX XXXX (several: one per line)"
+            class="flex-1 min-w-[200px] border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-mediko-blue resize-y"></textarea>
+          <input id="smsb-optout-note" type="text" maxlength="255" placeholder="Note (optional)"
+            class="w-48 border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-mediko-blue" />
+          <button onclick="addSmsOptouts()" class="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300 text-sm">Add</button>
+        </div>
+        <p id="smsb-optout-message" class="text-xs mb-2 hidden"></p>
+        <div id="smsb-optout-list" class="text-sm text-gray-700 max-h-64 overflow-y-auto"></div>
+      </div>
+    </section>
+
+    <!-- ───── Settings panel ───── -->
+    <section data-panel="settings" class="tab-panel hidden">
+      <div class="grid gap-4 lg:grid-cols-3">
+        <div class="lg:col-span-2 space-y-4">
+          <div id="settings-form" class="space-y-4"><p class="text-sm text-gray-500">Loading…</p></div>
+          <div class="flex items-center gap-3">
+            <button id="settings-save-btn" onclick="saveSettings()"
+              class="bg-mediko-blue text-white px-4 py-2 rounded shadow hover:brightness-110 text-sm">Save changes</button>
+            <p id="settings-message" class="text-xs hidden"></p>
+          </div>
+        </div>
+        <div class="bg-white shadow rounded-lg p-5 h-fit">
+          <h3 class="text-sm font-semibold text-gray-900 mb-1">Server secrets</h3>
+          <p class="text-xs text-gray-500 mb-3">
+            Keys and passwords stay in the server's <code class="bg-gray-100 px-1 rounded">.env</code> and can't be seen or changed here.
+            Change them on the server, then restart the app.
+          </p>
+          <ul id="settings-secrets" class="text-sm space-y-2"></ul>
+        </div>
+      </div>
+    </section>
   </div>
 
   <!-- Blast detail modal -->
@@ -439,6 +663,14 @@
       blast: {
         page: 1, totalPages: 1,
       },
+      sms: {
+        page: 1, totalPages: 1,
+        filters: {search: '', status: ''},
+      },
+      smsblast: {
+        page: 1, totalPages: 1,
+      },
+      settings: {},
     };
 
     // Reads a response as JSON, but surfaces what actually came back when it
@@ -561,6 +793,9 @@
 
     async function loadTab(name, page) {
       if (name === 'blast') return loadBlasts(page);
+      if (name === 'sms') return loadSms(page);
+      if (name === 'smsblast') return loadSmsBlasts(page);
+      if (name === 'settings') return loadSettings();
       const tab = TABS[name];
       if (page) tab.page = page;
       const tbody = document.getElementById(`body-${name}`);
@@ -1412,6 +1647,526 @@
     document.addEventListener('keydown', e => {
       if (e.key === 'Escape') {closeModal(); closeRejectModal(); closeBlastDetail();}
     });
+
+
+    // ── SMS ───────────────────────────────────────────────────────────────────
+
+    const SMS_STATUS_STYLES = {
+      sent: 'bg-green-100 text-green-800',
+      failed: 'bg-red-100 text-red-800',
+      skipped: 'bg-gray-200 text-gray-700',
+      queued: 'bg-blue-100 text-blue-800',
+    };
+
+    function showSmsNote(id, msg, ok) {
+      const el = document.getElementById(id);
+      el.textContent = msg;
+      el.className = `text-xs ${id === 'sms-test-message' ? 'mt-2 ' : ''}${ok ? 'text-green-700' : 'text-red-600'}`;
+    }
+
+    // Settings and credits only change when an admin saves, so they load once
+    // per tab visit; the log reloads on every page/filter change.
+    async function loadSms(page) {
+      if (!page) {loadSmsSettings(); loadSmsAccount();}
+      return loadSmsLog(page);
+    }
+
+    async function loadSmsSettings() {
+      try {
+        const s = await blastFetch('/api/sms/settings');
+        document.getElementById('sms-enabled-text').textContent = s.enabled ? 'On' : 'Off';
+        document.getElementById('sms-sender-text').textContent = s.senderName || "Semaphore's default sender";
+        const key = document.getElementById('sms-key-text');
+        key.textContent = s.apiKeySet ? 'Set in server .env' : 'Missing — add SEMAPHORE_API_KEY to the server .env';
+        key.className = s.apiKeySet ? '' : 'text-amber-700';
+        document.getElementById('sms-webhook-url').textContent = s.webhookUrl;
+        document.getElementById('sms-webhook-warning').classList.toggle('hidden', s.webhookSecretSet);
+
+        const state = document.getElementById('sms-state');
+        const [label, cls] = !s.apiKeySet ? ['Needs API key', 'bg-amber-100 text-amber-800']
+          : s.enabled ? ['Active', 'bg-green-100 text-green-800']
+          : ['Off', 'bg-gray-200 text-gray-700'];
+        state.textContent = label;
+        state.className = `inline-block px-2 py-1 rounded text-xs font-medium ${cls}`;
+      } catch (e) {
+        console.error('loadSmsSettings error:', e);
+        document.getElementById('sms-state').textContent = 'Error';
+      }
+    }
+
+    async function loadSmsAccount() {
+      const credits = document.getElementById('sms-credits');
+      const detail = document.getElementById('sms-account-detail');
+      credits.textContent = '…';
+      try {
+        const a = await blastFetch('/api/sms/account');
+        credits.textContent = Number(a.creditBalance).toLocaleString('en-PH');
+        detail.textContent = `${a.accountName || 'Semaphore account'} · ${a.status || ''}`;
+      } catch (e) {
+        credits.textContent = '—';
+        detail.textContent = e.message;
+      }
+    }
+
+    async function sendSmsTest() {
+      const number = document.getElementById('sms-test-number').value.trim();
+      if (!number) return showSmsNote('sms-test-message', 'Enter a mobile number.', false);
+      const btn = document.getElementById('sms-test-btn');
+      btn.disabled = true;
+      try {
+        const r = await blastFetch('/api/sms/test', {method: 'POST', body: JSON.stringify({number})});
+        showSmsNote('sms-test-message', `Sent${r.sender ? ` from ${r.sender}` : ''}. Status: ${r.status || 'queued'}.`, true);
+        loadSmsAccount();
+      } catch (e) {
+        showSmsNote('sms-test-message', e.message, false);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function applySmsFilters() {
+      TABS.sms.filters = {
+        search: document.getElementById('search-sms').value.trim(),
+        status: document.getElementById('status-sms').value,
+      };
+      loadSmsLog(1);
+    }
+
+    function formatPhone(p) {
+      return p && p.length === 12 ? `0${p.slice(2, 5)} ${p.slice(5, 8)} ${p.slice(8)}` : (p || '—');
+    }
+
+    function renderSmsRow(n) {
+      const cls = SMS_STATUS_STYLES[n.status] || 'bg-gray-200 text-gray-700';
+      const detail = n.status === 'sent'
+        ? `<div class="text-gray-700">${escHtml(n.message)}</div>`
+        : `<div class="text-xs ${n.status === 'failed' ? 'text-red-600' : 'text-gray-500'} break-words">${escHtml(n.error || '')}</div>`;
+      const tracking = [n.tracking_company, n.tracking_number].filter(Boolean).join(' · ');
+      const canRetry = n.status === 'failed' || n.status === 'skipped';
+      return `<tr>
+      <td class="px-6 py-4 text-sm">
+        <div class="font-medium text-gray-900">${escHtml(n.order_name || '—')}</div>
+        <div class="text-xs text-gray-500">${escHtml(tracking)}</div>
+      </td>
+      <td class="px-6 py-4 text-sm text-gray-700 whitespace-nowrap">${escHtml(formatPhone(n.phone))}</td>
+      <td class="px-6 py-4 text-sm">
+        <span class="inline-block px-2 py-1 rounded text-xs font-medium ${cls}">${escHtml(n.status)}</span>
+        ${n.attempts > 1 ? `<div class="text-xs text-gray-400 mt-1">${n.attempts} attempts</div>` : ''}
+      </td>
+      <td class="px-6 py-4 text-sm max-w-md">${detail}</td>
+      <td class="px-6 py-4 text-sm text-gray-500 whitespace-nowrap">${formatDate(n.sent_at || n.created_at)}</td>
+      <td class="px-6 py-4 text-sm">${canRetry
+        ? `<button onclick="retrySms(${n.id}, '${n.status}')" class="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs hover:bg-blue-200">${n.status === 'skipped' ? 'Send to number…' : 'Retry'}</button>`
+        : ''}</td>
+    </tr>`;
+    }
+
+    async function loadSmsLog(page) {
+      const tab = TABS.sms;
+      if (page) tab.page = page;
+      const tbody = document.getElementById('body-sms');
+      tbody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-gray-500">Loading…</td></tr>`;
+      try {
+        const params = new URLSearchParams({limit: 20, page: tab.page});
+        if (tab.filters.search) params.set('search', tab.filters.search);
+        if (tab.filters.status) params.set('status', tab.filters.status);
+        const json = await blastFetch(`/api/sms/notifications?${params}`);
+        tab.page = json.metadata.current_page;
+        tab.totalPages = json.metadata.total_pages;
+        updatePagination('sms', json.metadata);
+        const c = json.counts || {};
+        document.getElementById('sms-counts').textContent =
+          `All time: ${c.sent || 0} sent · ${c.failed || 0} failed · ${c.skipped || 0} skipped`;
+        tbody.innerHTML = json.data.length
+          ? json.data.map(renderSmsRow).join('')
+          : `<tr><td colspan="6" class="p-4 text-center text-gray-500">No texts yet. They appear here once orders ship.</td></tr>`;
+      } catch (e) {
+        console.error('loadSmsLog error:', e);
+        tbody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-red-500">Error: ${escHtml(e.message)}</td></tr>`;
+      }
+    }
+
+    async function retrySms(id, status) {
+      let body = {};
+      if (status === 'skipped') {
+        const phone = prompt('This order had no usable mobile number. Send to which number?', '09');
+        if (!phone) return;
+        body = {phone};
+      } else if (!confirm('Send this text again? Uses 1 credit.')) {
+        return;
+      }
+      try {
+        await blastFetch(`/api/sms/notifications/${id}/retry`, {method: 'POST', body: JSON.stringify(body)});
+      } catch (e) {
+        alert(`Not sent: ${e.message}`);
+      }
+      loadSmsLog();
+      loadSmsAccount();
+    }
+
+
+    // ── SMS blast ─────────────────────────────────────────────────────────────
+
+    let _smsbConfirmedTotal = null;
+    let _smsbPollTimer = null;
+
+    function smsbNote(id, msg, ok) {
+      const el = document.getElementById(id);
+      el.textContent = msg;
+      el.className = `text-xs ${id === 'smsb-message' ? 'mt-2 ' : 'mb-2 '}${ok ? 'text-green-700' : 'text-red-600'}`;
+    }
+
+    function smsAudience() {
+      const audience = {applications: [], contact: [], returns: [], extra: document.getElementById('smsb-extra').value};
+      document.querySelectorAll('[data-panel="smsblast"] input[data-source]:checked')
+        .forEach(cb => audience[cb.dataset.source].push(cb.value));
+      return audience;
+    }
+
+    function markSmsAudienceDirty() {
+      _smsbConfirmedTotal = null;
+      document.getElementById('smsb-audience-result').innerHTML = '';
+    }
+
+    // Mirrors the server: strip accents/emoji, then count GSM slots.
+    function smsPreviewText(raw) {
+      return raw.replace(/\r?\n/g, ' ').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^\x20-\x7E]/g, '').trim();
+    }
+    function smsSegmentsOf(text) {
+      const len = [...text].reduce((n, ch) => n + ('^{}\\[]~|'.includes(ch) ? 2 : 1), 0);
+      return {len, parts: len <= 160 ? 1 : Math.ceil(len / 153)};
+    }
+
+    function updateSmsCounter() {
+      // Assume a 10-letter first name for {{name}}.
+      const text = smsPreviewText(document.getElementById('smsb-body').value).replace(/\{\{\s*name\s*\}\}/gi, 'Xxxxxxxxxx');
+      const {len, parts} = smsSegmentsOf(text);
+      const el = document.getElementById('smsb-counter');
+      el.textContent = `${len} characters · ${parts} credit${parts === 1 ? '' : 's'} per recipient` +
+        (_smsbConfirmedTotal ? ` · about ${(parts * _smsbConfirmedTotal).toLocaleString('en-PH')} credits total` : '');
+      el.className = `text-xs mt-1 ${parts > 1 ? 'text-amber-700' : 'text-gray-500'}`;
+    }
+
+    function smsBlastContent() {
+      return {
+        title: document.getElementById('smsb-title').value.trim(),
+        body: document.getElementById('smsb-body').value.trim(),
+      };
+    }
+
+    async function countSmsAudience() {
+      const btn = document.getElementById('smsb-count-btn');
+      const out = document.getElementById('smsb-audience-result');
+      btn.disabled = true;
+      btn.textContent = 'Counting…';
+      try {
+        const json = await blastFetch('/api/sms-blasts/preview', {method: 'POST', body: JSON.stringify({audience: smsAudience()})});
+        _smsbConfirmedTotal = json.total;
+        const notes = [];
+        if (json.optedOut) notes.push(`${json.optedOut} opted out excluded`);
+        if (json.invalid.length) notes.push(`${json.invalid.length} invalid skipped: ${json.invalid.slice(0, 5).map(escHtml).join(', ')}`);
+        if (json.total > json.max) notes.push(`<span class="text-red-600">over the ${json.max} limit — narrow the audience</span>`);
+        const sample = json.sample.map(r =>
+          `<li class="truncate">${escHtml(r.full_name || '—')} <span class="text-gray-400">${escHtml(formatPhone(r.phone))}</span></li>`).join('');
+        out.innerHTML = `
+          <div class="text-base font-semibold text-gray-900">${json.total} recipient${json.total === 1 ? '' : 's'}</div>
+          ${notes.length ? `<div class="text-xs text-gray-500 mt-1">${notes.join(' · ')}</div>` : ''}
+          ${sample ? `<ul class="text-xs mt-2 space-y-0.5">${sample}</ul>
+            ${json.total > json.sample.length ? `<div class="text-xs text-gray-400 mt-1">…and ${json.total - json.sample.length} more</div>` : ''}` : ''}`;
+        updateSmsCounter();
+        return json.total;
+      } catch (e) {
+        out.innerHTML = `<span class="text-red-600">${escHtml(e.message)}</span>`;
+        return null;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Count recipients';
+      }
+    }
+
+    async function sendSmsBlastTest() {
+      const {title, body} = smsBlastContent();
+      const to = document.getElementById('smsb-test-to').value.trim();
+      if (!title || !body) return smsbNote('smsb-message', 'Write a title and message first.', false);
+      if (!to) return smsbNote('smsb-message', 'Enter a number to send the test to.', false);
+      const btn = document.getElementById('smsb-test-btn');
+      btn.disabled = true;
+      try {
+        await blastFetch('/api/sms-blasts/test', {method: 'POST', body: JSON.stringify({title, body, to})});
+        smsbNote('smsb-message', `Test sent to ${to} (with {{name}} as “Juan”).`, true);
+      } catch (e) {
+        smsbNote('smsb-message', e.message, false);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    async function sendSmsBlast() {
+      const {title, body} = smsBlastContent();
+      if (!title || !body) return smsbNote('smsb-message', 'Write a title and message first.', false);
+      const total = _smsbConfirmedTotal ?? await countSmsAudience();
+      if (total === null) return;
+      if (!total) return smsbNote('smsb-message', 'The selected audience has no recipients.', false);
+      const {parts} = smsSegmentsOf(smsPreviewText(body).replace(/\{\{\s*name\s*\}\}/gi, 'Xxxxxxxxxx'));
+      if (!confirm(`Text “${title}” to ${total} number${total === 1 ? '' : 's'}?\n\nAbout ${parts * total} credits. This cannot be undone.`)) return;
+
+      const btn = document.getElementById('smsb-send-btn');
+      btn.disabled = true;
+      btn.textContent = 'Starting…';
+      try {
+        const json = await blastFetch('/api/sms-blasts', {
+          method: 'POST',
+          body: JSON.stringify({title, body, audience: smsAudience(), expected_total: total}),
+        });
+        smsbNote('smsb-message', `SMS blast #${json.id} started — texting ${json.total} numbers.`, true);
+        document.getElementById('smsb-title').value = '';
+        document.getElementById('smsb-body').value = '';
+        updateSmsCounter();
+        loadSmsBlasts(1);
+      } catch (e) {
+        smsbNote('smsb-message', e.message, false);
+        if (/Audience changed/.test(e.message)) markSmsAudienceDirty();
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Send blast';
+      }
+    }
+
+    function renderSmsBlastRow(b) {
+      const sent = Number(b.sent), failed = Number(b.failed), skipped = Number(b.skipped);
+      const pct = b.total ? Math.round(((sent + failed + skipped) / b.total) * 100) : 0;
+      const cls = BLAST_STATUS_STYLES[b.status] || BLAST_STATUS_STYLES.cancelled;
+      const actions = [`<button onclick="openSmsBlastDetail(${b.id})" class="px-2 py-1 bg-gray-200 text-gray-700 rounded text-xs hover:bg-gray-300">Details</button>`];
+      if (b.status === 'interrupted') actions.push(`<button onclick="smsBlastAction(${b.id}, 'resume')" class="px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700">Resume</button>`);
+      if (b.status === 'sending' || b.status === 'interrupted') actions.push(`<button onclick="smsBlastAction(${b.id}, 'cancel')" class="px-2 py-1 bg-red-100 text-red-700 rounded text-xs hover:bg-red-200">Cancel</button>`);
+      return `<tr>
+      <td class="px-6 py-4 text-sm">
+        <div class="font-medium text-gray-900">${escHtml(b.title)}</div>
+        <div class="text-xs text-gray-500">#${b.id} · by ${escHtml(b.created_by || 'admin')}</div>
+      </td>
+      <td class="px-6 py-4 text-sm text-gray-500 whitespace-nowrap">${formatDate(b.created_at)}</td>
+      <td class="px-6 py-4 text-sm"><span class="inline-block px-2 py-1 rounded text-xs font-medium ${cls}">${escHtml(b.status)}</span></td>
+      <td class="px-6 py-4 text-sm min-w-[180px]">
+        <div class="w-full bg-gray-100 rounded h-2 mb-1"><div class="bg-mediko-blue h-2 rounded" style="width: ${pct}%"></div></div>
+        <div class="text-xs text-gray-600">${sent} sent / ${b.total}
+          ${failed ? `· <span class="text-red-600">${failed} failed</span>` : ''}
+          ${skipped ? `· <span class="text-gray-500">${skipped} skipped</span>` : ''}
+        </div>
+      </td>
+      <td class="px-6 py-4 text-sm"><div class="flex gap-1 flex-wrap">${actions.join('')}</div></td>
+    </tr>`;
+    }
+
+    async function loadSmsBlasts(page) {
+      const tab = TABS.smsblast;
+      if (page) tab.page = page;
+      clearTimeout(_smsbPollTimer);
+      if (!page) {loadSmsOptouts(); loadSmsSenderNote();}
+      updateSmsCounter();
+      const tbody = document.getElementById('body-smsblast');
+      if (!tbody.children.length) tbody.innerHTML = `<tr><td colspan="5" class="p-4 text-center text-gray-500">Loading…</td></tr>`;
+      try {
+        const json = await blastFetch(`/api/sms-blasts?limit=20&page=${tab.page}`);
+        tab.page = json.metadata.current_page;
+        tab.totalPages = json.metadata.total_pages;
+        updatePagination('smsblast', json.metadata);
+        tbody.innerHTML = json.data.length
+          ? json.data.map(renderSmsBlastRow).join('')
+          : `<tr><td colspan="5" class="p-4 text-center text-gray-500">No SMS blasts sent yet.</td></tr>`;
+        if (json.data.some(b => b.status === 'sending')) {
+          _smsbPollTimer = setTimeout(() => {if (activeTab === 'smsblast' && dashboardToken) loadSmsBlasts();}, 4000);
+        }
+      } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="5" class="p-4 text-center text-red-500">Error: ${escHtml(e.message)}</td></tr>`;
+      }
+    }
+
+    async function loadSmsSenderNote() {
+      try {
+        const s = await blastFetch('/api/sms/settings');
+        document.getElementById('smsb-sender-note').textContent = !s.apiKeySet
+          ? ' No Semaphore API key yet — set it in the SMS tab.'
+          : s.senderName ? ` Texts come from “${s.senderName}”.`
+          : ' No sender name set, so texts come from Semaphore’s default sender. Consider waiting for your sender name approval.';
+      } catch {/* the banner note is optional */}
+    }
+
+    async function smsBlastAction(id, action) {
+      const q = action === 'cancel' ? 'Stop this SMS blast? Numbers not yet texted will be skipped.' : 'Resume texting the numbers not yet sent?';
+      if (!confirm(q)) return;
+      try {
+        await blastFetch(`/api/sms-blasts/${id}/${action}`, {method: 'POST'});
+        setTimeout(() => loadSmsBlasts(), 800);
+      } catch (e) {
+        alert(`Failed to ${action} SMS blast: ${e.message}`);
+      }
+    }
+
+    async function openSmsBlastDetail(id) {
+      const modal = document.getElementById('blast-detail-modal');
+      const body = document.getElementById('blast-detail-body');
+      document.getElementById('blast-detail-title').textContent = `SMS blast #${id}`;
+      body.innerHTML = '<p class="text-gray-500">Loading…</p>';
+      modal.classList.remove('hidden');
+      try {
+        const b = await blastFetch(`/api/sms-blasts/${id}`);
+        document.getElementById('blast-detail-title').textContent = b.title;
+        const failures = b.failures.map(f => `
+          <tr>
+            <td class="px-3 py-2 whitespace-nowrap">${escHtml(formatPhone(f.phone))}</td>
+            <td class="px-3 py-2">${escHtml(f.full_name || '')}</td>
+            <td class="px-3 py-2">${escHtml(f.status)}</td>
+            <td class="px-3 py-2 text-xs text-gray-500 break-all">${escHtml(f.error || '')}</td>
+          </tr>`).join('');
+        body.innerHTML = `
+          <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 mb-4">
+            <dt class="text-gray-500">Status</dt><dd>${escHtml(b.status)}</dd>
+            <dt class="text-gray-500">Audience</dt><dd>${escHtml(describeAudience(b.audience).replace(/address(es)?/g, 'number$1'))}</dd>
+            <dt class="text-gray-500">Started</dt><dd>${formatDate(b.created_at)} by ${escHtml(b.created_by || 'admin')}</dd>
+            <dt class="text-gray-500">Finished</dt><dd>${formatDate(b.finished_at)}</dd>
+            <dt class="text-gray-500">Results</dt>
+            <dd>${b.sent} sent · ${b.failed} failed · ${b.skipped} skipped · ${b.queued} queued · ${b.total} total</dd>
+          </dl>
+          <div class="text-xs font-semibold text-gray-500 uppercase mb-1">Message</div>
+          <div class="whitespace-pre-wrap break-words bg-gray-50 border border-gray-200 rounded p-3 mb-4">${escHtml(b.body)}</div>
+          ${failures ? `
+            <div class="text-xs font-semibold text-gray-500 uppercase mb-1">Failed / skipped</div>
+            <table class="min-w-full text-sm divide-y divide-gray-200 border border-gray-200 rounded">
+              <tbody class="divide-y divide-gray-100">${failures}</tbody>
+            </table>` : ''}`;
+      } catch (e) {
+        body.innerHTML = `<p class="text-red-600">${escHtml(e.message)}</p>`;
+      }
+    }
+
+    async function loadSmsOptouts() {
+      const list = document.getElementById('smsb-optout-list');
+      try {
+        const {data} = await blastFetch('/api/sms-optouts');
+        list.innerHTML = data.length
+          ? `<ul class="divide-y divide-gray-100">${data.map(o => `
+              <li class="flex items-center justify-between gap-3 py-1.5">
+                <span><span class="font-medium">${escHtml(formatPhone(o.phone))}</span>
+                  <span class="text-xs text-gray-500">${escHtml(o.note || '')} · ${formatDate(o.created_at)}</span></span>
+                <button onclick="removeSmsOptout('${escHtml(o.phone)}')" class="text-xs text-red-600 hover:underline">Remove</button>
+              </li>`).join('')}</ul>`
+          : '<p class="text-xs text-gray-500">No opted-out numbers.</p>';
+      } catch (e) {
+        list.innerHTML = `<p class="text-xs text-red-600">${escHtml(e.message)}</p>`;
+      }
+    }
+
+    async function addSmsOptouts() {
+      const phones = document.getElementById('smsb-optout-input').value;
+      const note = document.getElementById('smsb-optout-note').value;
+      if (!phones.trim()) return;
+      try {
+        const r = await blastFetch('/api/sms-optouts', {method: 'POST', body: JSON.stringify({phones, note})});
+        smsbNote('smsb-optout-message', `Added ${r.added}.${r.invalid.length ? ` Skipped invalid: ${r.invalid.join(', ')}` : ''}`, true);
+        document.getElementById('smsb-optout-input').value = '';
+        document.getElementById('smsb-optout-note').value = '';
+        markSmsAudienceDirty();
+        loadSmsOptouts();
+      } catch (e) {
+        smsbNote('smsb-optout-message', e.message, false);
+      }
+    }
+
+    async function removeSmsOptout(phone) {
+      if (!confirm(`Remove ${formatPhone(phone)} from the opt-out list? They could receive blasts again.`)) return;
+      try {
+        await blastFetch(`/api/sms-optouts/${phone}`, {method: 'DELETE'});
+        markSmsAudienceDirty();
+        loadSmsOptouts();
+      } catch (e) {
+        alert(e.message);
+      }
+    }
+
+
+    // ── Settings ──────────────────────────────────────────────────────────────
+
+    // Last values loaded from the server, so Save only sends what changed.
+    let _settingsLoaded = {};
+
+    const SETTING_SOURCE_LABELS = {
+      saved: '',
+      env: '<span class="ml-2 text-[10px] uppercase tracking-wide bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded">from .env</span>',
+      default: '<span class="ml-2 text-[10px] uppercase tracking-wide bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded">default</span>',
+    };
+
+    function settingInput(s) {
+      const id = `setting-${s.key}`;
+      const base = 'w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-mediko-blue';
+      if (s.type === 'boolean') {
+        return `<label class="flex items-center gap-2 text-sm text-gray-800">
+          <input id="${id}" type="checkbox" class="h-4 w-4" ${s.value ? 'checked' : ''}> ${escHtml(s.label)}${SETTING_SOURCE_LABELS[s.source]}
+        </label>`;
+      }
+      const attrs = s.type === 'number' ? `type="number" min="${s.min}" max="${s.max}" step="any"`
+        : s.type === 'email' ? 'type="email"'
+        : s.type === 'sender_name' ? 'type="text" maxlength="11"'
+        : 'type="text"';
+      return `<label for="${id}" class="block text-xs font-medium text-gray-600 mb-1">${escHtml(s.label)}${SETTING_SOURCE_LABELS[s.source]}</label>
+        <input id="${id}" ${attrs} value="${escHtml(s.value)}" class="${base}" />`;
+    }
+
+    async function loadSettings() {
+      const form = document.getElementById('settings-form');
+      try {
+        const {settings, secrets} = await blastFetch('/api/settings');
+        _settingsLoaded = Object.fromEntries(settings.map(s => [s.key, s.value]));
+        const groups = [...new Set(settings.map(s => s.group))];
+        form.innerHTML = groups.map(g => `
+          <div class="bg-white shadow rounded-lg p-5">
+            <h3 class="text-sm font-semibold text-gray-900 mb-3">${escHtml(g)}</h3>
+            <div class="space-y-4">
+              ${settings.filter(s => s.group === g).map(s => `
+                <div>${settingInput(s)}
+                  <p class="text-xs text-gray-500 mt-1">${escHtml(s.help || '')}</p>
+                </div>`).join('')}
+            </div>
+          </div>`).join('');
+        document.getElementById('settings-secrets').innerHTML = secrets.map(x => `
+          <li class="flex items-start gap-2">
+            <span class="${x.set ? 'text-green-600' : 'text-gray-400'}">${x.set ? '●' : '○'}</span>
+            <span><span class="font-mono text-xs">${escHtml(x.name)}</span>
+              <span class="block text-xs text-gray-500">${escHtml(x.label)} — ${x.set ? 'set' : 'not set'}</span></span>
+          </li>`).join('');
+      } catch (e) {
+        form.innerHTML = `<p class="text-sm text-red-600">${escHtml(e.message)}</p>`;
+      }
+    }
+
+    function settingsNote(msg, ok) {
+      const el = document.getElementById('settings-message');
+      el.textContent = msg;
+      el.className = `text-xs ${ok ? 'text-green-700' : 'text-red-600'}`;
+    }
+
+    async function saveSettings() {
+      const values = {};
+      for (const [key, before] of Object.entries(_settingsLoaded)) {
+        const el = document.getElementById(`setting-${key}`);
+        if (!el) continue;
+        const now = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value.trim();
+        if (now !== before) values[key] = now;
+      }
+      if (!Object.keys(values).length) return settingsNote('No changes to save.', true);
+      const btn = document.getElementById('settings-save-btn');
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+      try {
+        await blastFetch('/api/settings', {method: 'PUT', body: JSON.stringify({values})});
+        settingsNote(`Saved ${Object.keys(values).length} change${Object.keys(values).length === 1 ? '' : 's'}.`, true);
+        await loadSettings();
+      } catch (e) {
+        settingsNote(e.message, false);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Save changes';
+      }
+    }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
