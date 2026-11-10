@@ -18,6 +18,7 @@
     /* Table text columns: capped so phone, date and status keep room. */
     .cell-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-width: 14rem; max-width: 26rem; }
     .nowrap { white-space: nowrap; }
+    .cell-one { display: block; max-width: 22rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .prewrap { white-space: pre-wrap; overflow-wrap: anywhere; }
     /* In-page title (the admin title bar also shows it). */
     .page-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -169,12 +170,12 @@
   // ── Router ─────────────────────────────────────────────────────────────────
   const ROUTES = [
     [/^\/?$/, viewHome],
-    [/^\/applications$/, viewApplications],
+    [/^\/applications$/, () => viewInbox('applications')],
     [/^\/applications\/(\d+)$/, viewApplication],
     [/^\/requests$/, () => go('/requests/returns')],
-    [/^\/requests\/messages$/, () => viewRequestList('messages')],
+    [/^\/requests\/messages$/, () => viewInbox('messages')],
     [/^\/requests\/messages\/(\d+)$/, viewMessage],
-    [/^\/requests\/returns$/, () => viewRequestList('returns')],
+    [/^\/requests\/returns$/, () => viewInbox('returns')],
     [/^\/requests\/returns\/(\d+)$/, viewReturn],
     [/^\/blasts$/, () => go('/blasts/email')],
     [/^\/blasts\/(email|sms)$/, viewBlastList],
@@ -327,8 +328,49 @@
     });
   }
 
-  // ── Applications ───────────────────────────────────────────────────────────
-  async function viewApplications() {
+  // ── Inbox lists (Senior/PWD, Returns, Messages) ────────────────────────────
+  // One compact table shape for all three: name + email | key field | date |
+  // status | ⋯ menu. Rows open the detail page; the menu holds quick actions.
+  const INBOX = {
+    applications: {
+      title: 'Senior/PWD', path: '/applications', api: '/api/submissions', countKey: 'applications',
+      nameHeader: 'Applicant', keyHeader: 'ID number', dateHeader: 'Submitted',
+      searchLabel: 'Name, email or ID number',
+      keyCell: (r) => `<span class="mono nowrap">${esc(r.id_number)}</span>`,
+      tabs: (c) => [['all', 'All', c.total], ['pending', 'Pending', c.pending || 0], ['approved', 'Approved'], ['rejected', 'Rejected']],
+      empty: ['No Senior/PWD applications yet', 'SC and PWD discount applications from mediko.ph show up here.'],
+      noun: 'applications',
+    },
+    returns: {
+      title: 'Returns', path: '/requests/returns', api: '/api/return-requests', countKey: 'returns',
+      nameHeader: 'Customer', keyHeader: 'Order', dateHeader: 'Submitted',
+      searchLabel: 'Name, email or order number',
+      keyCell: (r) => `<span class="mono nowrap">${esc(r.order_number)}</span>`,
+      tabs: (c) => [['all', 'All', c.total], ['pending', 'Pending', c.pending || 0], ['approved', 'Approved'], ['rejected', 'Rejected']],
+      empty: ['No returns yet', 'Return requests from mediko.ph show up here.'],
+      noun: 'returns',
+    },
+    messages: {
+      title: 'Messages', path: '/requests/messages', api: '/api/contact-submissions', countKey: 'contact',
+      nameHeader: 'From', keyHeader: 'Message', dateHeader: 'Received',
+      searchLabel: 'Name, email or message',
+      keyCell: (r) => `<span class="cell-one">${esc(r.message)}</span>`,
+      tabs: (c) => [['all', 'All', c.total], ['pending', 'Pending', c.pending || 0], ['resolved', 'Resolved']],
+      empty: ['No messages yet', 'Messages from the mediko.ph contact form show up here.'],
+      noun: 'messages',
+    },
+  };
+
+  // Menu items per page and status: [label, action, tone]
+  function rowActions(kind, status) {
+    if (kind === 'messages') return status === 'pending' ? [['Mark resolved', 'resolve']] : [['Reopen', 'reopen']];
+    return status === 'pending'
+      ? [['Approve', 'approve'], ['Reject…', 'reject', 'critical']]
+      : [['Revert to pending…', 'revert']];
+  }
+
+  async function viewInbox(kind) {
+    const cfg = INBOX[kind];
     const q = qs();
     const state = { status: q.get('status') || 'all', search: q.get('search') || '', from: q.get('from') || '', to: q.get('to') || '' };
     const page = Math.max(1, parseInt(q.get('page'), 10) || 1);
@@ -337,68 +379,97 @@
     if (state.search) params.set('search', state.search);
     if (state.from) params.set('date_from', state.from);
     if (state.to) params.set('date_to', state.to);
-    const [list, counts] = await Promise.all([api(`/api/submissions?${params}`), api('/api/inbox/counts')]);
-    const meta = list.metadata; const c = counts.applications;
+    const [list, counts] = await Promise.all([api(`${cfg.api}?${params}`), api('/api/inbox/counts')]);
+    const meta = list.metadata;
 
-    const orderCell = (a) => a.assigned_order_name
-      ? `<s-stack direction="inline" gap="small-200" alignItems="center"><s-text>${esc(a.assigned_order_name)}</s-text>
-           ${a.assigned_tag ? `<s-badge>${esc(a.assigned_tag)}</s-badge>` : ''}
-           ${a.refunded_at ? '<s-badge tone="critical">Refunded</s-badge>' : ''}</s-stack>`
-      : '<s-text color="subdued">Not assigned</s-text>';
-    const rows = list.data.map((a) => `<s-table-row clickDelegate="app-link-${a.id}">
-      <s-table-cell><s-stack gap="none"><s-link id="app-link-${a.id}" href="${BASE}/applications/${a.id}">${esc(a.full_name)}</s-link>
-        <s-text color="subdued">${esc(a.email_address)}</s-text></s-stack></s-table-cell>
-      <s-table-cell>${phoneCell(a.contact_number)}</s-table-cell>
-      <s-table-cell><span class="mono">${esc(a.id_number)}</span></s-table-cell>
-      <s-table-cell>${dateCell(a.created_at)}</s-table-cell>
-      <s-table-cell>${badge(a.status || 'pending')}</s-table-cell>
-      <s-table-cell>${orderCell(a)}</s-table-cell>
-      <s-table-cell>${(a.status || 'pending') === 'pending' ? `
-        <s-button icon="menu-horizontal" variant="tertiary" commandFor="app-menu-${a.id}" accessibilityLabel="Actions for ${esc(a.full_name)}"></s-button>
-        <s-menu id="app-menu-${a.id}" accessibilityLabel="Actions for ${esc(a.full_name)}">
-          <s-button data-approve="${a.id}">Approve</s-button>
-          <s-button tone="critical" data-reject="${a.id}" data-name="${esc(a.full_name)}">Reject…</s-button>
-        </s-menu>` : ''}</s-table-cell>
-    </s-table-row>`).join('');
+    const rows = list.data.map((r) => {
+      const status = r.status || 'pending';
+      const href = `${BASE}${cfg.path}/${r.id}`;
+      return `<s-table-row clickDelegate="row-link-${r.id}">
+        <s-table-cell><s-stack gap="none">
+          <s-link id="row-link-${r.id}" href="${href}">${esc(r.full_name)}</s-link>
+          <s-text color="subdued"><span class="cell-one">${esc(r.email_address)}</span></s-text>
+        </s-stack></s-table-cell>
+        <s-table-cell>${cfg.keyCell(r)}</s-table-cell>
+        <s-table-cell>${dateCell(r.created_at)}</s-table-cell>
+        <s-table-cell>${badge(status)}</s-table-cell>
+        <s-table-cell>
+          <s-button icon="menu-horizontal" variant="tertiary" commandFor="row-menu-${r.id}" accessibilityLabel="Actions for ${esc(r.full_name)}"></s-button>
+          <s-menu id="row-menu-${r.id}" accessibilityLabel="Actions for ${esc(r.full_name)}">
+            <s-button href="${href}">View</s-button>
+            ${rowActions(kind, status).map(([label, act, tone]) =>
+              `<s-button ${tone ? `tone="${tone}"` : ''} data-act="${act}" data-id="${r.id}" data-name="${esc(r.full_name)}" data-code="${esc(r.discount_code || '')}">${label}</s-button>`).join('')}
+          </s-menu>
+        </s-table-cell>
+      </s-table-row>`;
+    }).join('');
 
     const filtered = state.search || state.from || state.to || state.status !== 'all';
-    const body = list.data.length ? `<s-section padding="none">
-        <s-table id="app-table" paginate ${meta.current_page < meta.total_pages ? 'hasNextPage' : ''} ${meta.current_page > 1 ? 'hasPreviousPage' : ''}>
-          ${filterBar({ searchLabel: 'Name, email or ID number', ...state })}
+    const filters = filterBar({ searchLabel: cfg.searchLabel, ...state });
+    const body = list.data.length
+      ? `<s-section padding="none"><s-table id="inbox-table" paginate ${meta.current_page < meta.total_pages ? 'hasNextPage' : ''} ${meta.current_page > 1 ? 'hasPreviousPage' : ''}>
+          ${filters}
           <s-table-header-row>
-            <s-table-header listSlot="primary">Applicant</s-table-header>
-            <s-table-header>Contact</s-table-header>
-            <s-table-header>ID number</s-table-header>
-            <s-table-header>Submitted</s-table-header>
+            <s-table-header listSlot="primary">${cfg.nameHeader}</s-table-header>
+            <s-table-header>${cfg.keyHeader}</s-table-header>
+            <s-table-header>${cfg.dateHeader}</s-table-header>
             <s-table-header listSlot="inline">Status</s-table-header>
-            <s-table-header>Order</s-table-header>
             <s-table-header><span style="position:absolute;left:-9999px">Actions</span></s-table-header>
           </s-table-header-row>
           <s-table-body>${rows}</s-table-body>
         </s-table></s-section>`
       : filtered
-        ? `<s-section padding="none"><s-table>${filterBar({ searchLabel: 'Name, email or ID number', ...state })}<s-table-body></s-table-body></s-table></s-section>
-           ${emptyState('No Senior/PWD applications match', 'Try a different name, status or date range.', `<s-button href="${BASE}/applications">Clear filters</s-button>`)}`
-        : emptyState('No Senior/PWD applications yet', 'SC and PWD discount applications from mediko.ph show up here.');
+        ? `<s-section padding="none"><s-table>${filters}<s-table-body></s-table-body></s-table></s-section>
+           ${state.status === 'pending' && !state.search && !state.from && !state.to
+              ? emptyState(`No pending ${cfg.noun}`, 'You’re all caught up.')
+              : emptyState(`No ${cfg.noun} match`, 'Try a different search, status or date range.', `<s-button href="${BASE}${cfg.path}">Clear filters</s-button>`)}`
+        : emptyState(...cfg.empty);
 
-    $app.innerHTML = `<s-page heading="Senior/PWD"><s-stack gap="base">
-      ${pageTitle('Senior/PWD')}
-      ${statusTabs('/applications', state, state.status, [['all', 'All', c.total], ['pending', 'Pending', c.pending || 0], ['approved', 'Approved'], ['rejected', 'Rejected']])}
+    $app.innerHTML = `<s-page heading="${cfg.title}"><s-stack gap="base">
+      ${pageTitle(cfg.title)}
+      ${statusTabs(cfg.path, state, state.status, cfg.tabs(counts[cfg.countKey]))}
       ${body}
     </s-stack></s-page>
-    ${rejectModal('application')}`;
+    ${kind === 'messages' ? '' : rejectModal(kind === 'returns' ? 'return' : 'application')}
+    <s-modal id="revert-list-modal" heading="Revert to pending?">
+      <s-stack gap="base" id="revert-list-body"></s-stack>
+      <s-button slot="primary-action" variant="primary" tone="critical" id="revert-list-confirm">Revert to pending</s-button>
+      <s-button slot="secondary-actions" commandFor="revert-list-modal" command="--hide">Cancel</s-button>
+    </s-modal>`;
 
-    wireFilters('/applications', state);
-    wirePaging('app-table', '/applications', state, meta);
-    onAll('[data-approve]', 'click', async (e) => {
-      const id = e.currentTarget.dataset.approve;
+    wireFilters(cfg.path, state);
+    wirePaging('inbox-table', cfg.path, state, meta);
+    const reload = () => viewInbox(kind);
+    const setStatus = async (id, status, okMsg) => {
       loading(true);
-      try { await api(`/api/submissions/${id}/status`, { method: 'PATCH', body: { status: 'approved' } }); toast('Application approved'); viewApplications(); }
-      catch (err) { toast(`Couldn’t approve: ${err.message}`, true); }
+      try { await api(`${cfg.api}/${id}/status`, { method: 'PATCH', body: { status } }); toast(okMsg); reload(); }
+      catch (err) { toast(`Couldn’t update: ${err.message}`, true); }
       finally { loading(false); }
+    };
+    const okText = { applications: 'Application', returns: 'Return' };
+    let revertId = null;
+    onAll('[data-act]', 'click', (e) => {
+      const { act, id, name, code } = e.currentTarget.dataset;
+      if (act === 'approve') setStatus(id, 'approved', `${okText[kind]} approved`);
+      else if (act === 'reject') openReject(id, name);
+      else if (act === 'resolve') setStatus(id, 'resolved', 'Message resolved');
+      else if (act === 'reopen') setStatus(id, 'pending', 'Message reopened');
+      else if (act === 'revert') {
+        revertId = id;
+        byId('revert-list-body').innerHTML = kind === 'applications' && code
+          ? `<s-banner tone="warning">${esc(name)}’s discount code ${esc(code)} will be deleted. The customer can’t use it anymore. This can’t be undone.</s-banner>`
+          : `<s-paragraph>${esc(name)}’s ${kind === 'returns' ? 'return' : 'application'} goes back to the pending list.</s-paragraph>`;
+        showModal('revert-list-modal');
+      }
     });
-    onAll('[data-reject]', 'click', (e) => openReject(e.currentTarget.dataset.reject, e.currentTarget.dataset.name));
-    wireReject('application', (id, reason) => api(`/api/submissions/${id}/status`, { method: 'PATCH', body: { status: 'rejected', reason } }), viewApplications);
+    on('revert-list-confirm', 'click', () => {
+      hideModal('revert-list-modal');
+      setStatus(revertId, 'pending', `${okText[kind]} set back to pending`);
+    });
+    if (kind !== 'messages') {
+      wireReject(kind === 'returns' ? 'return' : 'application',
+        (id, reason) => api(`${cfg.api}/${id}/status`, { method: 'PATCH', body: { status: 'rejected', reason } }), reload);
+    }
   }
 
   // Reject-with-reason modal, shared by applications and returns.
@@ -622,70 +693,7 @@
     });
   }
 
-  // ── Requests: messages + returns ───────────────────────────────────────────
-  async function viewRequestList(kind) {
-    const isMsg = kind === 'messages';
-    const path = `/requests/${kind}`;
-    const q = qs();
-    const state = { status: q.get('status') || 'all', search: q.get('search') || '', from: q.get('from') || '', to: q.get('to') || '' };
-    const page = Math.max(1, parseInt(q.get('page'), 10) || 1);
-    const params = new URLSearchParams({ page, limit: 20 });
-    if (state.status !== 'all') params.set('status', state.status);
-    if (state.search) params.set('search', state.search);
-    if (state.from) params.set('date_from', state.from);
-    if (state.to) params.set('date_to', state.to);
-    const [list, counts] = await Promise.all([
-      api(`/api/${isMsg ? 'contact-submissions' : 'return-requests'}?${params}`),
-      api('/api/inbox/counts'),
-    ]);
-    const meta = list.metadata;
-    const c = isMsg ? counts.contact : counts.returns;
-
-    const rows = list.data.map((r) => isMsg
-      ? `<s-table-row clickDelegate="req-link-${r.id}">
-          <s-table-cell><s-stack gap="none"><s-link id="req-link-${r.id}" href="${BASE}${path}/${r.id}">${esc(r.full_name)}</s-link><s-text color="subdued">${esc(r.email_address)}</s-text></s-stack></s-table-cell>
-          <s-table-cell>${phoneCell(r.contact_number)}</s-table-cell>
-          <s-table-cell><span class="cell-text">${esc(r.message)}</span></s-table-cell>
-          <s-table-cell>${dateCell(r.created_at)}</s-table-cell>
-          <s-table-cell>${badge(r.status || 'pending')}</s-table-cell>
-        </s-table-row>`
-      : `<s-table-row clickDelegate="req-link-${r.id}">
-          <s-table-cell><s-stack gap="none"><s-link id="req-link-${r.id}" href="${BASE}${path}/${r.id}">${esc(r.full_name)}</s-link><s-text color="subdued">${esc(r.email_address)} · ${phoneCell(r.contact_number)}</s-text></s-stack></s-table-cell>
-          <s-table-cell><span class="mono">${esc(r.order_number)}</span></s-table-cell>
-          <s-table-cell><span class="cell-text">${esc(r.items_to_return)}</span></s-table-cell>
-          <s-table-cell>${dateCell(r.created_at)}</s-table-cell>
-          <s-table-cell>${badge(r.status || 'pending')}</s-table-cell>
-        </s-table-row>`).join('');
-
-    const headers = isMsg
-      ? ['From', 'Contact', 'Message', 'Date', 'Status'] : ['Customer', 'Order', 'Items', 'Date', 'Status'];
-    const tabs = isMsg
-      ? [['all', 'All', c.total], ['pending', 'Pending', c.pending || 0], ['resolved', 'Resolved']]
-      : [['all', 'All', c.total], ['pending', 'Pending', c.pending || 0], ['approved', 'Approved'], ['rejected', 'Rejected']];
-    const searchLabel = isMsg ? 'Name, email or message' : 'Name, email or order number';
-    const filtered = state.search || state.from || state.to || state.status !== 'all';
-    const body = list.data.length
-      ? `<s-section padding="none"><s-table id="req-table" paginate ${meta.current_page < meta.total_pages ? 'hasNextPage' : ''} ${meta.current_page > 1 ? 'hasPreviousPage' : ''}>
-          ${filterBar({ searchLabel, ...state })}
-          <s-table-header-row>${headers.map((h, i) => `<s-table-header${i === 0 ? ' listSlot="primary"' : i === 4 ? ' listSlot="inline"' : ''}>${h}</s-table-header>`).join('')}</s-table-header-row>
-          <s-table-body>${rows}</s-table-body></s-table></s-section>`
-      : filtered
-        ? `<s-section padding="none"><s-table>${filterBar({ searchLabel, ...state })}<s-table-body></s-table-body></s-table></s-section>
-           ${state.status === 'pending' && !state.search && !state.from && !state.to
-              ? emptyState(`No pending ${kind}`, 'You’re all caught up.')
-              : emptyState(`No ${kind} match`, 'Try a different search, status or date range.', `<s-button href="${BASE}${path}">Clear filters</s-button>`)}`
-        : emptyState(`No ${kind} yet`, isMsg ? 'Messages from the mediko.ph contact form show up here.' : 'Return requests from mediko.ph show up here.');
-
-    const heading = isMsg ? 'Messages' : 'Returns';
-    $app.innerHTML = `<s-page heading="${heading}"><s-stack gap="base">
-      ${pageTitle(heading)}
-      ${statusTabs(path, state, state.status, tabs)}
-      ${body}
-    </s-stack></s-page>`;
-    wireFilters(path, state);
-    wirePaging('req-table', path, state, meta);
-  }
-
+  // ── Message + return detail ────────────────────────────────────────────────
   async function viewMessage(id) {
     const m = await api(`/api/contact-submissions/${id}`);
     const status = m.status || 'pending';
