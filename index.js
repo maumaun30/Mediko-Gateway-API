@@ -386,21 +386,36 @@ function verifyShopifySessionToken(token) {
   return payload;
 }
 
+// Accepts either credential:
+// - a Shopify session token, which App Bridge v4 attaches to every fetch() to
+//   this domain automatically (the redesigned portal relies on this), or
+// - a dashboard JWT from POST /api/auth/shopify (older portal builds).
 function requireAdmin(req, res, next) {
-  const secret = dashboardSecret();
-  if (!secret) return res.status(503).json({ error: "Admin auth is not configured on the server." });
   const authHeader = req.headers.authorization || "";
   if (!authHeader.startsWith("Bearer ")) {
     return res.status(401).json({ error: "Missing Bearer token" });
   }
+  const token = authHeader.slice(7);
+
+  const secret = dashboardSecret();
+  if (secret) {
+    try {
+      req.admin = jwt.verify(token, secret, {
+        algorithms: ["HS256"],
+        issuer: DASHBOARD_JWT.issuer,
+        audience: DASHBOARD_JWT.audience,
+      });
+      return next();
+    } catch {
+      /* not a dashboard JWT — try a Shopify session token */
+    }
+  }
   try {
-    req.admin = jwt.verify(authHeader.slice(7), secret, {
-      algorithms: ["HS256"],
-      issuer: DASHBOARD_JWT.issuer,
-      audience: DASHBOARD_JWT.audience,
-    });
-    next();
-  } catch {
+    const shopify = verifyShopifySessionToken(token);
+    req.admin = { sub: String(shopify.sub), shop: new URL(shopify.dest).hostname, sid: shopify.sid };
+    return next();
+  } catch (err) {
+    log("warn", "admin_token_rejected", { reason: err.message, path: req.path, ip: req.ip });
     return res.status(401).json({ error: "Invalid or expired token" });
   }
 }
@@ -1827,6 +1842,10 @@ app.get("/api/submissions", requireAdmin, (req, res) => {
     whereClauses.push("created_at <= ?");
     whereParams.push(`${dateTo} 23:59:59`);
   }
+  if (["pending", "approved", "rejected", "resolved"].includes(req.query.status)) {
+    whereClauses.push("status = ?");
+    whereParams.push(req.query.status);
+  }
 
   const whereSql = whereClauses.length
     ? ` WHERE ${whereClauses.join(" AND ")}`
@@ -2445,6 +2464,137 @@ app.use("/admin-dashboard", (req, res, next) => {
   express.static(path.join(__dirname, "admin-portal"))(req, res, next);
 });
 
+// The portal is one HTML file with path-based pages (/admin-dashboard/applications/12,
+// …), so any path that isn't a real file serves index.html.
+app.get(/^\/admin-dashboard(\/.*)?$/, (req, res, next) => {
+  if (/\.[a-z0-9]+$/i.test(req.path)) return next();
+  res.sendFile(path.join(__dirname, "admin-portal", "index.html"));
+});
+
+// ── Single records (portal detail pages) ─────────────────────────────────────
+const RECORD_TABLES = {
+  "submissions": "applications",
+  "contact-submissions": "contact_submissions",
+  "return-requests": "return_requests",
+};
+for (const [route, table] of Object.entries(RECORD_TABLES)) {
+  app.get(`/api/${route}/:id`, requireAdmin, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: "Invalid id" });
+    try {
+      const rows = await queryAsync(`SELECT * FROM ${table} WHERE id = ?`, [id]);
+      if (!rows.length) return res.status(404).json({ error: "Not found" });
+      res.json(rows[0]);
+    } catch (err) {
+      log("error", "record_get_failed", { table, id, message: err.message });
+      res.status(500).json({ error: err.message });
+    }
+  });
+}
+
+// ── Inbox counts (status tabs + Home) ────────────────────────────────────────
+async function inboxCounts() {
+  const out = {};
+  for (const [key, table] of [["applications", "applications"], ["contact", "contact_submissions"], ["returns", "return_requests"]]) {
+    const rows = await queryAsync(`SELECT status, COUNT(*) AS c FROM ${table} GROUP BY status`);
+    const counts = { total: 0 };
+    for (const r of rows) {
+      counts[r.status || "pending"] = Number(r.c);
+      counts.total += Number(r.c);
+    }
+    out[key] = counts;
+  }
+  return out;
+}
+
+app.get("/api/inbox/counts", requireAdmin, async (_req, res) => {
+  try {
+    res.json(await inboxCounts());
+  } catch (err) {
+    log("error", "inbox_counts_failed", { message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Setup guide flags (Home) ──────────────────────────────────────────────────
+// Internal flags, not operator settings, so they live outside SETTINGS.
+const SETUP_FLAGS = ["setup_checkout_phone_done", "setup_test_sms_sent", "setup_guide_dismissed"];
+
+async function setSetupFlag(key, on, by) {
+  await queryAsync(
+    `INSERT INTO app_settings (setting_key, setting_value, updated_by) VALUES (?, ?, ?)
+     ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_by = VALUES(updated_by)`,
+    [key, on ? "true" : "false", by],
+  );
+}
+
+app.post("/api/setup", requireAdmin, async (req, res) => {
+  const body = req.body || {};
+  const map = { checkout_phone_done: "setup_checkout_phone_done", guide_dismissed: "setup_guide_dismissed" };
+  const keys = Object.keys(body).filter((k) => map[k] && typeof body[k] === "boolean");
+  if (!keys.length) return res.status(400).json({ error: "Nothing to update." });
+  try {
+    for (const k of keys) await setSetupFlag(map[k], body[k], adminName(req));
+    res.json({ success: true });
+  } catch (err) {
+    log("error", "setup_flag_failed", { message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Home summary ──────────────────────────────────────────────────────────────
+app.get("/api/dashboard", requireAdmin, async (_req, res) => {
+  try {
+    const counts = await inboxCounts();
+    const [sms7] = await queryAsync(
+      `SELECT SUM(status = 'sent') AS sent, SUM(status = 'failed') AS failed
+       FROM sms_notifications WHERE created_at >= NOW() - INTERVAL 7 DAY`,
+    );
+    const [smsToday] = await queryAsync(
+      "SELECT COUNT(*) AS failed FROM sms_notifications WHERE status = 'failed' AND created_at >= CURDATE()",
+    );
+    const interrupted = [
+      ...(await queryAsync(
+        `SELECT b.id, b.subject AS title, b.total, 'email' AS kind,
+                (SELECT COUNT(*) FROM email_blast_recipients r WHERE r.blast_id = b.id AND r.status <> 'queued') AS done
+         FROM email_blasts b WHERE b.status = 'interrupted' ORDER BY b.created_at DESC LIMIT 3`,
+      )),
+      ...(await queryAsync(
+        `SELECT b.id, b.title, b.total, 'sms' AS kind,
+                (SELECT COUNT(*) FROM sms_blast_recipients r WHERE r.blast_id = b.id AND r.status <> 'queued') AS done
+         FROM sms_blasts b WHERE b.status = 'interrupted' ORDER BY b.created_at DESC LIMIT 3`,
+      )),
+    ];
+    const flagRows = await queryAsync(
+      "SELECT setting_key, setting_value FROM app_settings WHERE setting_key IN (?)",
+      [SETUP_FLAGS],
+    );
+    const flags = Object.fromEntries(flagRows.map((r) => [r.setting_key, r.setting_value === "true"]));
+    const sms = getSmsConfig();
+    res.json({
+      counts,
+      sms: {
+        sent7d: Number(sms7?.sent || 0),
+        failed7d: Number(sms7?.failed || 0),
+        failedToday: Number(smsToday?.failed || 0),
+        enabled: sms.enabled,
+      },
+      interrupted,
+      setup: {
+        apiKeySet: Boolean(sms.apiKey),
+        webhookSecretSet: Boolean(process.env.SHOPIFY_WEBHOOK_SECRET || process.env.SHOPIFY_CLIENT_SECRET),
+        senderName: sms.senderName,
+        checkoutPhoneDone: Boolean(flags.setup_checkout_phone_done),
+        testSmsSent: Boolean(flags.setup_test_sms_sent),
+        dismissed: Boolean(flags.setup_guide_dismissed),
+      },
+    });
+  } catch (err) {
+    log("error", "dashboard_failed", { message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── GET /api/contact-submissions ──────────────────────────────────────────────
 app.get("/api/contact-submissions", requireAdmin, async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
@@ -2468,6 +2618,10 @@ app.get("/api/contact-submissions", requireAdmin, async (req, res) => {
   if (/^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {
     whereClauses.push("created_at <= ?");
     whereParams.push(`${dateTo} 23:59:59`);
+  }
+  if (["pending", "approved", "rejected", "resolved"].includes(req.query.status)) {
+    whereClauses.push("status = ?");
+    whereParams.push(req.query.status);
   }
   const whereSql = whereClauses.length ? ` WHERE ${whereClauses.join(" AND ")}` : "";
 
@@ -2546,6 +2700,10 @@ app.get("/api/return-requests", requireAdmin, async (req, res) => {
   if (/^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {
     whereClauses.push("created_at <= ?");
     whereParams.push(`${dateTo} 23:59:59`);
+  }
+  if (["pending", "approved", "rejected", "resolved"].includes(req.query.status)) {
+    whereClauses.push("status = ?");
+    whereParams.push(req.query.status);
   }
   const whereSql = whereClauses.length ? ` WHERE ${whereClauses.join(" AND ")}` : "";
 
@@ -3552,6 +3710,7 @@ app.post("/api/sms/test", requireAdmin, async (req, res) => {
       buildShippingSms({ orderName: "#TEST", company: "J&T Express", trackingNumber: "000000000" }),
     );
     log("info", "sms_test_sent", { messageId: sent.message_id, ip: req.ip });
+    setSetupFlag("setup_test_sms_sent", true, adminName(req)).catch(() => {});
     res.json({ success: true, messageId: sent.message_id, status: sent.status, sender: sent.sender_name });
   } catch (err) {
     log("error", "sms_test_failed", { message: err.message });

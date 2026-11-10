@@ -38,6 +38,11 @@ MySQL via `mysql2` connection pool. Three tables: `applications`, `contact_submi
 
 The portal is **admin-only**: it works only embedded in the Shopify admin. There is no password login.
 
+`requireAdmin` accepts either of two bearer tokens:
+
+- **A Shopify session token (current portal).** App Bridge v4 attaches a fresh one to every `fetch()` to this domain automatically. `requireAdmin` verifies it per request with `verifyShopifySessionToken()` (below) and sets `req.admin = { sub, shop, sid }`.
+- **A dashboard JWT (older portal builds),** obtained like this:
+
 1. The portal gets a Shopify session token from App Bridge (a JWT, HS256-signed with `SHOPIFY_CLIENT_SECRET`, ~60s life) and sends it to `POST /api/auth/shopify` as `Authorization: Bearer`.
 2. `verifyShopifySessionToken()` checks it the way Shopify documents: HS256 signature, `exp`/`nbf` (5s clock tolerance), `aud` = app client ID (`SHOPIFY_CLIENT_ID`, else read from `shopify.app.toml`), `iss` and `dest` on the same host. It also pins `dest` to `SHOPIFY_SHOP_DOMAIN`, so tokens for any other shop are refused.
 3. On success it mints a 15-minute dashboard JWT (HS256, `iss: mediko-gateway`, `aud: mediko-admin`, `sub` = Shopify staff user ID) signed with `DASHBOARD_JWT_SECRET`. The portal renews it in the background and re-exchanges silently on any 401.
@@ -72,7 +77,15 @@ Admin bulk SMS under `/api/sms-blasts*` (all `requireAdmin`), a copy of the emai
 
 ### Admin SPA
 
-`admin-portal/index.html` is a single static HTML file (Tailwind via CDN, vanilla JS, no build) served at `/admin-dashboard` via `express.static`. It calls the same `/api/*` routes with the dashboard JWT in `Authorization: Bearer` (see **Admin auth**). The CSP middleware below the routes sets `frame-ancestors` from `ALLOWED_ORIGINS` so the SPA can be embedded inside Shopify admin via App Bridge — keep new origins in sync there.
+`admin-portal/index.html` is one static file: a native Shopify embedded app built with **Polaris web components** (`s-page`, `s-section`, `s-table`, …) and **App Bridge v4** (`app-bridge.js` + the `shopify-api-key` meta tag), both from Shopify's CDN, plus plain JS. No build step, no Tailwind, no custom styling beyond layout glue. Designed from the Claude Design handoff "Mediko Gateway Redesign".
+
+- **Pages** are path-based under `/admin-dashboard/` (Home, `applications[/:id]`, `requests/messages|returns[/:id]`, `blasts/email|sms[/new|/:id]`, `shipping-sms`, `settings`). Each navigation is a full page load; an `app.get(/^\/admin-dashboard(\/.*)?$/)` fallback serves `index.html` for any path that isn't a real file. The `ROUTES` table in the script maps paths to `view*` functions.
+- **Admin chrome comes from App Bridge:** `s-app-nav` (sidebar), `s-page` heading/`primary-action`/`secondary-actions`/`breadcrumb-actions` (title bar), `s-modal` for every confirmation (no `alert`/`confirm`/`prompt`), `shopify.toast` for feedback, `shopify.loading` for page loads, and `<form data-save-bar>` on Settings.
+- **Auth:** calls use plain `fetch('/api/...')`; App Bridge adds the session token (see **Admin auth**). Opened outside the admin iframe, the page shows only an "Open this app from your Shopify admin" notice.
+- **Status badges:** one mapping (`TONES`) for every status.
+- **Portal-only endpoints:** `GET /api/{submissions|contact-submissions|return-requests}/:id`, the `status` filter on those three lists, `GET /api/inbox/counts`, `GET /api/dashboard` (Home metrics, banners, setup guide), and `POST /api/setup` (setup-guide flags `setup_*` in `app_settings`; a successful `/api/sms/test` sets `setup_test_sms_sent`).
+
+The CSP middleware sets `frame-ancestors` from `ALLOWED_ORIGINS` so the admin can frame it — keep new origins in sync there.
 
 ### File uploads
 
