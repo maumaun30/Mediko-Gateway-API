@@ -3120,7 +3120,7 @@ app.post("/api/blasts/test", requireAdmin, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     log("error", "blast_test_failed", { message: err.message });
-    res.status(502).json({ error: `Mailer error: ${err.message}` });
+    res.status(500).json({ error: `Mailer error: ${err.message}` });
   }
 });
 
@@ -3650,7 +3650,7 @@ app.get("/api/sms/account", requireAdmin, async (_req, res) => {
     res.json(data);
   } catch (err) {
     log("error", "sms_account_failed", { message: err.message });
-    res.status(502).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -3708,7 +3708,7 @@ app.post("/api/sms/notifications/:id/retry", requireAdmin, async (req, res) => {
     const result = await deliverShippingSms(rows[0].fulfillment_id, { phoneOverride });
     log("info", "sms_retry", { id: req.params.id, result: result.status, ip: req.ip });
     if (result.status === "sent") return res.json({ success: true, status: "sent" });
-    res.status(502).json({ error: result.error || "No valid PH mobile number on the order.", status: result.status });
+    res.status(500).json({ error: result.error || "No valid PH mobile number on the order.", status: result.status });
   } catch (err) {
     log("error", "sms_retry_failed", { id: req.params.id, message: err.message });
     res.status(500).json({ error: err.message });
@@ -3730,7 +3730,7 @@ app.post("/api/sms/test", requireAdmin, async (req, res) => {
     res.json({ success: true, messageId: sent.message_id, status: sent.status, sender: sent.sender_name });
   } catch (err) {
     log("error", "sms_test_failed", { message: err.message });
-    res.status(502).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -3835,13 +3835,6 @@ async function resolveSmsAudience(audience) {
     optedOut = rows.length;
   }
   return { recipients: [...byPhone.values()], invalid, optedOut };
-}
-
-// Credits per message: 1 for ≤160 chars, then 153 per part. A few ASCII
-// characters take two GSM slots.
-function smsSegments(text) {
-  const len = [...text].reduce((n, ch) => n + ("^{}\\[]~|".includes(ch) ? 2 : 1), 0);
-  return len <= 160 ? 1 : Math.ceil(len / 153);
 }
 
 function fillSmsBlast(body, recipient) {
@@ -3979,7 +3972,7 @@ app.post("/api/sms-blasts/test", requireAdmin, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     log("error", "sms_blast_test_failed", { message: err.message });
-    res.status(502).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 

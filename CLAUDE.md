@@ -107,3 +107,7 @@ Two Multer instances (`upload` for ID photos, `returnsUpload` for return attachm
 ### Logging
 
 Use the `log(level, event, data)` helper for any new logging — it emits one JSON line per event with a timestamp. Do not add bare `console.log` calls in request paths.
+
+### Error status codes
+
+Never answer 502. Cloudflare fronts the app and replaces an origin 502 body with its own HTML page, so the JSON `error` never reaches the portal (it shows only "Server error 502"). Upstream failures (Shopify, Brevo, Semaphore) answer 500 with `{ error }`.
