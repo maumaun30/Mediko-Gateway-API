@@ -15,6 +15,9 @@
     body { margin: 0; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     .clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    /* Table text columns: capped so phone, date and status keep room. */
+    .cell-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-width: 14rem; max-width: 26rem; }
+    .nowrap { white-space: nowrap; }
     .prewrap { white-space: pre-wrap; overflow-wrap: anywhere; }
     /* In-page title (the admin title bar also shows it). */
     .page-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -24,8 +27,9 @@
 <body>
   <s-app-nav>
     <s-link href="/admin-dashboard/" rel="home">Home</s-link>
-    <s-link href="/admin-dashboard/applications">Applications</s-link>
-    <s-link href="/admin-dashboard/requests">Requests</s-link>
+    <s-link href="/admin-dashboard/applications">Senior/PWD</s-link>
+    <s-link href="/admin-dashboard/requests/returns">Returns</s-link>
+    <s-link href="/admin-dashboard/requests/messages">Messages</s-link>
     <s-link href="/admin-dashboard/blasts">Blasts</s-link>
     <s-link href="/admin-dashboard/shipping-sms">Shipping SMS</s-link>
     <s-link href="/admin-dashboard/settings">Settings</s-link>
@@ -78,6 +82,16 @@
   const fmtDate = (ts) => ts
     ? new Date(ts).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })
     : '—';
+  // Compact date for tables: "Nov 9, 4:55 AM" this year, "Nov 9, 2025" otherwise.
+  function fmtShort(ts) {
+    if (!ts) return '—';
+    const d = new Date(ts);
+    return d.getFullYear() === new Date().getFullYear()
+      ? d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+      : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  }
+  const phoneCell = (p) => `<span class="nowrap">${esc(fmtPhone(p))}</span>`;
+  const dateCell = (ts) => `<span class="nowrap" title="${esc(fmtDate(ts))}">${esc(fmtShort(ts))}</span>`;
   const fmtDay = (d) => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
   function fmtPhone(p) {
     let d = String(p || '').replace(/\D/g, '');
@@ -157,7 +171,7 @@
     [/^\/?$/, viewHome],
     [/^\/applications$/, viewApplications],
     [/^\/applications\/(\d+)$/, viewApplication],
-    [/^\/requests$/, () => go('/requests/messages')],
+    [/^\/requests$/, () => go('/requests/returns')],
     [/^\/requests\/messages$/, () => viewRequestList('messages')],
     [/^\/requests\/messages\/(\d+)$/, viewMessage],
     [/^\/requests\/returns$/, () => viewRequestList('returns')],
@@ -264,7 +278,7 @@
       ${pageTitle('Home')}
       ${banners.join('')}
       <s-grid gap="base" gridTemplateColumns="repeat(auto-fit, minmax(14rem, 1fr))">
-        ${metric('Pending applications', num(c.applications.pending), 'View pending →', `${BASE}/applications?status=pending`)}
+        ${metric('Pending Senior/PWD', num(c.applications.pending), 'View pending →', `${BASE}/applications?status=pending`)}
         ${metric('Pending messages', num(c.contact.pending), 'View pending →', `${BASE}/requests/messages?status=pending`)}
         ${metric('Pending returns', num(c.returns.pending), 'View pending →', `${BASE}/requests/returns?status=pending`)}
         ${metric('Shipping texts sent · last 7 days', num(d.sms.sent7d), 'Automatic, on fulfilment')}
@@ -334,9 +348,9 @@
     const rows = list.data.map((a) => `<s-table-row clickDelegate="app-link-${a.id}">
       <s-table-cell><s-stack gap="none"><s-link id="app-link-${a.id}" href="${BASE}/applications/${a.id}">${esc(a.full_name)}</s-link>
         <s-text color="subdued">${esc(a.email_address)}</s-text></s-stack></s-table-cell>
-      <s-table-cell>${esc(fmtPhone(a.contact_number))}</s-table-cell>
+      <s-table-cell>${phoneCell(a.contact_number)}</s-table-cell>
       <s-table-cell><span class="mono">${esc(a.id_number)}</span></s-table-cell>
-      <s-table-cell>${esc(fmtDate(a.created_at))}</s-table-cell>
+      <s-table-cell>${dateCell(a.created_at)}</s-table-cell>
       <s-table-cell>${badge(a.status || 'pending')}</s-table-cell>
       <s-table-cell>${orderCell(a)}</s-table-cell>
       <s-table-cell>${(a.status || 'pending') === 'pending' ? `
@@ -364,11 +378,11 @@
         </s-table></s-section>`
       : filtered
         ? `<s-section padding="none"><s-table>${filterBar({ searchLabel: 'Name, email or ID number', ...state })}<s-table-body></s-table-body></s-table></s-section>
-           ${emptyState('No applications match', 'Try a different name, status or date range.', `<s-button href="${BASE}/applications">Clear filters</s-button>`)}`
-        : emptyState('No applications yet', 'SC and PWD discount applications from mediko.ph show up here.');
+           ${emptyState('No Senior/PWD applications match', 'Try a different name, status or date range.', `<s-button href="${BASE}/applications">Clear filters</s-button>`)}`
+        : emptyState('No Senior/PWD applications yet', 'SC and PWD discount applications from mediko.ph show up here.');
 
-    $app.innerHTML = `<s-page heading="Applications"><s-stack gap="base">
-      ${pageTitle('Applications')}
+    $app.innerHTML = `<s-page heading="Senior/PWD"><s-stack gap="base">
+      ${pageTitle('Senior/PWD')}
       ${statusTabs('/applications', state, state.status, [['all', 'All', c.total], ['pending', 'Pending', c.pending || 0], ['approved', 'Approved'], ['rejected', 'Rejected']])}
       ${body}
     </s-stack></s-page>
@@ -463,7 +477,7 @@
     const kv = (label, value) => `<s-stack gap="none"><s-text color="subdued">${esc(label)}</s-text>${value}</s-stack>`;
 
     $app.innerHTML = `<s-page heading="${esc(a.full_name)}">
-      <s-link slot="breadcrumb-actions" href="${BASE}/applications">Applications</s-link>
+      <s-link slot="breadcrumb-actions" href="${BASE}/applications">Senior/PWD</s-link>
       ${badge(status, 'accessory')}
       ${actions}
       <s-stack gap="base">
@@ -630,16 +644,16 @@
     const rows = list.data.map((r) => isMsg
       ? `<s-table-row clickDelegate="req-link-${r.id}">
           <s-table-cell><s-stack gap="none"><s-link id="req-link-${r.id}" href="${BASE}${path}/${r.id}">${esc(r.full_name)}</s-link><s-text color="subdued">${esc(r.email_address)}</s-text></s-stack></s-table-cell>
-          <s-table-cell>${esc(fmtPhone(r.contact_number))}</s-table-cell>
-          <s-table-cell><span class="clamp">${esc(r.message)}</span></s-table-cell>
-          <s-table-cell>${esc(fmtDate(r.created_at))}</s-table-cell>
+          <s-table-cell>${phoneCell(r.contact_number)}</s-table-cell>
+          <s-table-cell><span class="cell-text">${esc(r.message)}</span></s-table-cell>
+          <s-table-cell>${dateCell(r.created_at)}</s-table-cell>
           <s-table-cell>${badge(r.status || 'pending')}</s-table-cell>
         </s-table-row>`
       : `<s-table-row clickDelegate="req-link-${r.id}">
-          <s-table-cell><s-stack gap="none"><s-link id="req-link-${r.id}" href="${BASE}${path}/${r.id}">${esc(r.full_name)}</s-link><s-text color="subdued">${esc(r.email_address)} · ${esc(fmtPhone(r.contact_number))}</s-text></s-stack></s-table-cell>
+          <s-table-cell><s-stack gap="none"><s-link id="req-link-${r.id}" href="${BASE}${path}/${r.id}">${esc(r.full_name)}</s-link><s-text color="subdued">${esc(r.email_address)} · ${phoneCell(r.contact_number)}</s-text></s-stack></s-table-cell>
           <s-table-cell><span class="mono">${esc(r.order_number)}</span></s-table-cell>
-          <s-table-cell><span class="clamp">${esc(r.items_to_return)}</span></s-table-cell>
-          <s-table-cell>${esc(fmtDate(r.created_at))}</s-table-cell>
+          <s-table-cell><span class="cell-text">${esc(r.items_to_return)}</span></s-table-cell>
+          <s-table-cell>${dateCell(r.created_at)}</s-table-cell>
           <s-table-cell>${badge(r.status || 'pending')}</s-table-cell>
         </s-table-row>`).join('');
 
@@ -662,12 +676,9 @@
               : emptyState(`No ${kind} match`, 'Try a different search, status or date range.', `<s-button href="${BASE}${path}">Clear filters</s-button>`)}`
         : emptyState(`No ${kind} yet`, isMsg ? 'Messages from the mediko.ph contact form show up here.' : 'Return requests from mediko.ph show up here.');
 
-    $app.innerHTML = `<s-page heading="Requests"><s-stack gap="base">
-      ${pageTitle('Requests')}
-      <s-stack direction="inline" gap="small-200">
-        <s-button href="${BASE}/requests/messages" variant="${isMsg ? 'primary' : 'secondary'}">Messages ${num(counts.contact.pending || 0)}</s-button>
-        <s-button href="${BASE}/requests/returns" variant="${isMsg ? 'secondary' : 'primary'}">Returns ${num(counts.returns.pending || 0)}</s-button>
-      </s-stack>
+    const heading = isMsg ? 'Messages' : 'Returns';
+    $app.innerHTML = `<s-page heading="${heading}"><s-stack gap="base">
+      ${pageTitle(heading)}
       ${statusTabs(path, state, state.status, tabs)}
       ${body}
     </s-stack></s-page>`;
@@ -779,7 +790,7 @@
       return `<s-table-row clickDelegate="blast-link-${b.id}">
         <s-table-cell><s-link id="blast-link-${b.id}" href="${BASE}/blasts/${kind}/${b.id}">${esc(isSms ? b.title : b.subject)}</s-link></s-table-cell>
         <s-table-cell>${esc(b.created_by || 'admin')}</s-table-cell>
-        <s-table-cell>${esc(fmtDate(b.created_at))}</s-table-cell>
+        <s-table-cell>${dateCell(b.created_at)}</s-table-cell>
         <s-table-cell>${badge(b.status)}</s-table-cell>
         <s-table-cell><s-stack gap="none"><s-text>${num(sent)} / ${num(b.total)} sent</s-text>
           <s-text color="subdued">${num(failed)} failed · ${num(skipped)} skipped</s-text></s-stack></s-table-cell>
@@ -804,8 +815,8 @@
               <s-table-header listSlot="primary">Number</s-table-header><s-table-header>Note</s-table-header>
               <s-table-header>Added</s-table-header><s-table-header><span style="position:absolute;left:-9999px">Remove</span></s-table-header>
             </s-table-header-row><s-table-body>${optouts.data.map((o) => `<s-table-row>
-              <s-table-cell>${esc(fmtPhone(o.phone))}</s-table-cell><s-table-cell>${esc(o.note || '—')}</s-table-cell>
-              <s-table-cell>${esc(fmtDate(o.created_at))}</s-table-cell>
+              <s-table-cell>${phoneCell(o.phone)}</s-table-cell><s-table-cell>${esc(o.note || '—')}</s-table-cell>
+              <s-table-cell>${dateCell(o.created_at)}</s-table-cell>
               <s-table-cell><s-button variant="tertiary" tone="critical" data-remove-optout="${esc(o.phone)}">Remove</s-button></s-table-cell>
             </s-table-row>`).join('')}</s-table-body></s-table>`
             : '<s-text color="subdued">No opted-out numbers.</s-text>'}
@@ -886,7 +897,7 @@
     let confirmedTotal = null;
 
     const sources = `
-      <s-choice-list id="aud-applications" label="Applications" multiple>
+      <s-choice-list id="aud-applications" label="Senior/PWD" multiple>
         <s-choice value="approved">Approved</s-choice><s-choice value="pending">Pending</s-choice><s-choice value="rejected">Rejected</s-choice>
       </s-choice-list>
       <s-choice-list id="aud-contact" label="Messages" multiple>
@@ -1039,7 +1050,7 @@
 
   function describeAudience(raw, isSms) {
     let a; try { a = JSON.parse(raw || '{}'); } catch { return '—'; }
-    const labels = { applications: 'Applications', contact: 'Messages', returns: 'Returns' };
+    const labels = { applications: 'Senior/PWD', contact: 'Messages', returns: 'Returns' };
     const parts = Object.entries(labels).filter(([k]) => a[k]?.length).map(([k, l]) => `${l}: ${a[k].join(', ')}`);
     if (a.extra?.length) parts.push(plural(a.extra.length, isSms ? 'extra number' : 'extra email'));
     return parts.join(' · ') || '—';
@@ -1125,11 +1136,11 @@
     const rows = log.data.map((n) => `<s-table-row>
       <s-table-cell><s-stack gap="none"><s-text type="strong">${esc(n.order_name || '—')}</s-text>
         <s-text color="subdued">${esc([n.tracking_company, n.tracking_number].filter(Boolean).join(' · '))}</s-text></s-stack></s-table-cell>
-      <s-table-cell>${esc(fmtPhone(n.phone))}</s-table-cell>
+      <s-table-cell>${phoneCell(n.phone)}</s-table-cell>
       <s-table-cell>${badge(n.status)}</s-table-cell>
-      <s-table-cell><span class="clamp">${esc(n.status === 'sent' ? n.message : n.status === 'queued' ? 'Waiting to send' : (n.error || ''))}</span></s-table-cell>
+      <s-table-cell><span class="cell-text">${esc(n.status === 'sent' ? n.message : n.status === 'queued' ? 'Waiting to send' : (n.error || ''))}</span></s-table-cell>
       <s-table-cell>${num(n.attempts)}</s-table-cell>
-      <s-table-cell>${esc(fmtDate(n.sent_at || n.created_at))}</s-table-cell>
+      <s-table-cell>${dateCell(n.sent_at || n.created_at)}</s-table-cell>
       <s-table-cell>${n.status === 'failed' || n.status === 'skipped' ? `
         <s-button icon="menu-horizontal" variant="tertiary" commandFor="sms-menu-${n.id}" accessibilityLabel="Actions for ${esc(n.order_name)}"></s-button>
         <s-menu id="sms-menu-${n.id}" accessibilityLabel="Actions for ${esc(n.order_name)}">
