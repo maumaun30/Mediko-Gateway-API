@@ -16,6 +16,9 @@
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     .clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
     .prewrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+    /* In-page title (the admin title bar also shows it). */
+    .page-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .page-title h1 { margin: 0; font: 650 1.25rem/1.75rem -apple-system, BlinkMacSystemFont, "San Francisco", "Segoe UI", Roboto, "Helvetica Neue", sans-serif; color: #303030; overflow-wrap: anywhere; }
   </style>
 </head>
 <body>
@@ -103,6 +106,9 @@
   const photoUrls = (csv) => String(csv || '').split(',').map((p) => p.trim()).filter(Boolean)
     .map((p) => `/view-uploads/${encodeURIComponent(p.split(/[\\/]/).pop())}`);
 
+  // Page title shown at the top of every page; `html` must already be escaped.
+  const pageTitle = (html, extra = '') => `<div class="page-title"><h1>${html}</h1>${extra}</div>`;
+
   function errorSection(msg, retryId = 'retry-load') {
     return `<s-section>
       <s-banner tone="critical" heading="Couldn't load this page">
@@ -118,7 +124,7 @@
     </s-stack></s-section>`;
   }
   function renderError(page, err) {
-    $app.innerHTML = `<s-page heading="${esc(page)}">${errorSection(err.message)}</s-page>`;
+    $app.innerHTML = `<s-page heading="${esc(page)}"><s-stack gap="base">${pageTitle(esc(page))}${errorSection(err.message)}</s-stack></s-page>`;
     on('retry-load', 'click', () => location.reload());
   }
 
@@ -183,7 +189,7 @@
         return;
       }
     }
-    $app.innerHTML = `<s-page heading="Page not found">${emptyState('This page doesn’t exist', 'Use the app menu to find what you need.')}</s-page>`;
+    $app.innerHTML = `<s-page heading="Page not found"><s-stack gap="base">${pageTitle('Page not found')}${emptyState('This page doesn’t exist', 'Use the app menu to find what you need.')}</s-stack></s-page>`;
   }
 
   // ── Home ───────────────────────────────────────────────────────────────────
@@ -254,7 +260,8 @@
             <s-button variant="tertiary" id="dismiss-guide">Dismiss</s-button>
           </s-stack></s-section>`;
 
-    $app.innerHTML = `<s-page heading="Home">
+    $app.innerHTML = `<s-page heading="Home"><s-stack gap="base">
+      ${pageTitle('Home')}
       ${banners.join('')}
       <s-grid gap="base" gridTemplateColumns="repeat(auto-fit, minmax(14rem, 1fr))">
         ${metric('Pending applications', num(c.applications.pending), 'View pending →', `${BASE}/applications?status=pending`)}
@@ -265,7 +272,7 @@
         ${metric('Semaphore credits', credits == null ? '—' : num(credits), credits == null ? 'Couldn’t load balance' : 'Current balance')}
       </s-grid>
       ${guide}
-    </s-page>
+    </s-stack></s-page>
     ${testSmsModal()}`;
 
     on('mark-phone-done', 'click', async () => {
@@ -360,10 +367,11 @@
            ${emptyState('No applications match', 'Try a different name, status or date range.', `<s-button href="${BASE}/applications">Clear filters</s-button>`)}`
         : emptyState('No applications yet', 'SC and PWD discount applications from mediko.ph show up here.');
 
-    $app.innerHTML = `<s-page heading="Applications">
+    $app.innerHTML = `<s-page heading="Applications"><s-stack gap="base">
+      ${pageTitle('Applications')}
       ${statusTabs('/applications', state, state.status, [['all', 'All', c.total], ['pending', 'Pending', c.pending || 0], ['approved', 'Approved'], ['rejected', 'Rejected']])}
       ${body}
-    </s-page>
+    </s-stack></s-page>
     ${rejectModal('application')}`;
 
     wireFilters('/applications', state);
@@ -458,6 +466,8 @@
       <s-link slot="breadcrumb-actions" href="${BASE}/applications">Applications</s-link>
       ${badge(status, 'accessory')}
       ${actions}
+      <s-stack gap="base">
+      ${pageTitle(esc(a.full_name), badge(status))}
       ${status === 'rejected' && a.rejection_reason ? `<s-banner tone="critical" heading="Rejected">${esc(a.rejection_reason)}</s-banner>` : ''}
       <s-section heading="ID photos">
         ${photos.length ? `<s-grid gap="base" gridTemplateColumns="repeat(auto-fit, minmax(9rem, 1fr))">
@@ -476,6 +486,7 @@
           ${kv('Submitted', `<s-text>${esc(fmtDate(a.created_at))}</s-text>`)}
         </s-grid>
       </s-section>
+      </s-stack>
       <s-section slot="aside" heading="Discount">${discount}</s-section>
       <s-section slot="aside" heading="Order">${order}</s-section>
     </s-page>
@@ -651,14 +662,15 @@
               : emptyState(`No ${kind} match`, 'Try a different search, status or date range.', `<s-button href="${BASE}${path}">Clear filters</s-button>`)}`
         : emptyState(`No ${kind} yet`, isMsg ? 'Messages from the mediko.ph contact form show up here.' : 'Return requests from mediko.ph show up here.');
 
-    $app.innerHTML = `<s-page heading="Requests">
+    $app.innerHTML = `<s-page heading="Requests"><s-stack gap="base">
+      ${pageTitle('Requests')}
       <s-button-group>
         <s-button href="${BASE}/requests/messages" variant="${isMsg ? 'primary' : 'secondary'}">Messages ${num(counts.contact.pending || 0)}</s-button>
         <s-button href="${BASE}/requests/returns" variant="${isMsg ? 'secondary' : 'primary'}">Returns ${num(counts.returns.pending || 0)}</s-button>
       </s-button-group>
       ${statusTabs(path, state, state.status, tabs)}
       ${body}
-    </s-page>`;
+    </s-stack></s-page>`;
     wireFilters(path, state);
     wirePaging('req-table', path, state, meta);
   }
@@ -670,10 +682,13 @@
       <s-link slot="breadcrumb-actions" href="${BASE}/requests/messages">Messages</s-link>
       ${badge(status, 'accessory')}
       <s-button slot="primary-action" variant="primary" id="toggle-msg">${status === 'pending' ? 'Mark resolved' : 'Reopen'}</s-button>
+      <s-stack gap="base">
+      ${pageTitle(esc(m.full_name), badge(status))}
       <s-section heading="Message">
         <s-paragraph><span class="prewrap">${esc(m.message)}</span></s-paragraph>
         <s-text color="subdued">Received ${esc(fmtDate(m.created_at))}</s-text>
       </s-section>
+      </s-stack>
       <s-section slot="aside" heading="From">
         <s-stack gap="small-200">
           <s-text>${esc(m.full_name)}</s-text>
@@ -703,6 +718,8 @@
         ? `<s-button slot="primary-action" variant="primary" id="approve-ret">Approve</s-button>
            <s-button slot="secondary-actions" id="reject-ret">Reject</s-button>`
         : `<s-button slot="secondary-actions" commandFor="revert-ret-modal" command="--show">Revert</s-button>`}
+      <s-stack gap="base">
+      ${pageTitle(`Return for ${esc(r.order_number)}`, badge(status))}
       ${status === 'rejected' && r.rejection_reason ? `<s-banner tone="critical" heading="Rejected">${esc(r.rejection_reason)}</s-banner>` : ''}
       <s-section heading="Items to return"><s-paragraph><span class="prewrap">${esc(r.items_to_return)}</span></s-paragraph></s-section>
       <s-section heading="Reason"><s-paragraph><span class="prewrap">${esc(r.reason)}</span></s-paragraph></s-section>
@@ -712,6 +729,7 @@
             <s-image src="${esc(u)}" alt="Return photo ${i + 1}" aspectRatio="4/3" objectFit="cover" borderRadius="base"></s-image></s-clickable>`).join('')}
         </s-grid>` : '<s-text color="subdued">No photos uploaded.</s-text>'}
       </s-section>
+      </s-stack>
       <s-section slot="aside" heading="Customer">
         <s-stack gap="small-200">
           <s-text>${esc(r.full_name)}</s-text>
@@ -796,13 +814,15 @@
     $app.innerHTML = `<s-page heading="Blasts">
       <s-button slot="primary-action" variant="primary" href="${BASE}/blasts/${kind}/new">Create ${isSms ? 'SMS' : 'email'} blast</s-button>
       ${isSms ? '<s-button slot="secondary-actions" commandFor="optout-modal" command="--show">Add opt-outs</s-button>' : ''}
+      <s-stack gap="base">
+      ${pageTitle('Blasts')}
       <s-button-group>
         <s-button href="${BASE}/blasts/email" variant="${isSms ? 'secondary' : 'primary'}">Email</s-button>
         <s-button href="${BASE}/blasts/sms" variant="${isSms ? 'primary' : 'secondary'}">SMS</s-button>
       </s-button-group>
       ${history}
       ${optoutSection}
-    </s-page>
+    </s-stack></s-page>
     ${isSms ? `<s-modal id="optout-modal" heading="Add opt-outs">
       <s-stack gap="base">
         <s-text-area id="optout-phones" label="Phone numbers" rows="4" details="One per line. Add several at once."></s-text-area>
@@ -883,6 +903,8 @@
     $app.innerHTML = `<s-page heading="Create ${isSms ? 'SMS' : 'email'} blast">
       <s-link slot="breadcrumb-actions" href="${BASE}/blasts/${kind}">Blasts</s-link>
       <s-button slot="primary-action" variant="primary" id="send-blast">Send blast</s-button>
+      <s-stack gap="base">
+      ${pageTitle(`Create ${isSms ? 'SMS' : 'email'} blast`)}
       ${senderBanner}
       <s-section heading="Audience">
         <s-stack gap="base">
@@ -910,7 +932,7 @@
           <s-button id="test-btn">Send test</s-button>
         </s-grid>
       </s-section>
-    </s-page>
+    </s-stack></s-page>
     <s-modal id="send-modal" heading="Send this blast?">
       <s-stack gap="small"><s-paragraph id="send-text"></s-paragraph><s-text color="subdued">This can’t be undone.</s-text></s-stack>
       <s-button slot="primary-action" variant="primary" id="send-confirm">Send blast</s-button>
@@ -1035,6 +1057,8 @@
       ${badge(b.status, 'accessory')}
       ${b.status === 'interrupted' ? '<s-button slot="primary-action" variant="primary" id="resume-btn">Resume</s-button>' : ''}
       ${canCancel ? '<s-button slot="secondary-actions" commandFor="cancel-modal" command="--show">Cancel blast</s-button>' : ''}
+      <s-stack gap="base">
+      ${pageTitle(esc(title), badge(b.status))}
       ${b.status === 'interrupted' ? `<s-banner tone="warning">Sending stopped at ${num(b.sent + b.failed + b.skipped)} of ${num(b.total)}. Resume to send to the remaining ${plural(b.queued, 'person', 'people')}.</s-banner>` : ''}
       <s-section heading="Results">
         <s-grid gap="base" gridTemplateColumns="repeat(auto-fit, minmax(8rem, 1fr))">
@@ -1057,7 +1081,7 @@
           <s-table-cell>${esc(isSms ? fmtPhone(f.phone) : f.email)}${f.full_name ? ` <s-text color="subdued">${esc(f.full_name)}</s-text>` : ''}</s-table-cell>
           <s-table-cell>${badge(f.status)}</s-table-cell><s-table-cell>${esc(f.error || '')}</s-table-cell>
         </s-table-row>`).join('')}</s-table-body></s-table></s-section>` : ''}
-    </s-page>
+    </s-stack></s-page>
     <s-modal id="cancel-modal" heading="Cancel this blast?">
       <s-paragraph>${plural(b.sent, isSms ? 'text' : 'email')} already went out. The remaining ${num(b.queued)} won’t be sent.</s-paragraph>
       <s-button slot="primary-action" variant="primary" tone="critical" id="cancel-confirm">Cancel blast</s-button>
@@ -1118,6 +1142,8 @@
     $app.innerHTML = `<s-page heading="Shipping SMS">
       <s-button slot="secondary-actions" commandFor="test-sms-modal" command="--show">Send test SMS</s-button>
       <s-button slot="secondary-actions" id="refresh-credits">Refresh credits</s-button>
+      <s-stack gap="base">
+      ${pageTitle('Shipping SMS')}
       ${!s.webhookSecretSet ? '<s-banner tone="critical" heading="Webhook secret missing">Shopify can’t confirm fulfilment events. Add the webhook secret on the server.</s-banner>' : ''}
       <s-section>
         <s-grid gap="base" gridTemplateColumns="repeat(auto-fit, minmax(10rem, 1fr))">
@@ -1146,7 +1172,7 @@
           ? `<s-section><s-search-field id="f-search" label="Search" labelAccessibilityVisibility="exclusive" placeholder="Order, phone or tracking number" value="${esc(state.search)}"></s-search-field></s-section>
              ${emptyState('No shipping texts match', 'Try a different status or search.', `<s-button href="${BASE}/shipping-sms">Clear filters</s-button>`)}`
           : emptyState('No shipping texts yet', 'Texts appear here when orders are marked fulfilled.', '<s-button commandFor="test-sms-modal" command="--show">Send test SMS</s-button>')}
-    </s-page>
+    </s-stack></s-page>
     ${testSmsModal()}
     <s-modal id="sendto-modal" heading="Send to number">
       <s-stack gap="base">
@@ -1228,6 +1254,7 @@
     $app.innerHTML = `<form id="settings-form" data-save-bar data-discard-confirmation>
       <s-page heading="Settings">
         <s-stack gap="large">
+          ${pageTitle('Settings')}
           ${groups}
           <s-grid gap="base" gridTemplateColumns="repeat(auto-fit, minmax(16rem, 1fr))">
             <s-box padding="small-200"><s-stack gap="small-200"><s-heading>Server secrets</s-heading>
