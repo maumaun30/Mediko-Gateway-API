@@ -3,7 +3,7 @@
 client_id = "ee63d07f77aeb73c3ade6dd713eb40f7"
 application_url = "https://mediko-gateway.quailshack.com/admin-dashboard/"
 embedded = true
-name = "Form Submissions"
+name = "MedikoPH Gateway"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
