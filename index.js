@@ -227,6 +227,7 @@ db.getConnection((err, conn) => {
     conn.release();
     // ensureStatusColumn();
     ensureSettingsTable();
+    ensureTemplatesTable();
     ensureContactTable();
     ensureReturnsTable();
     ensureBlastTables();
@@ -666,26 +667,13 @@ async function sendApplicationEmails(application, reqFiles, metadataStr) {
       }))
     : [];
 
+  const received = renderEmail("application_received", recordVars("application", { ...application, id: insertId }));
   const applicantMail = {
     from: `"Mediko.ph" <${process.env.MAIL_FROM}>`,
     to: email_address,
-    subject: "Application Received - Mediko.ph Discount",
-    html: `
-      <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
-        <h2 style="color: #2c3e50;">Hello ${full_name},</h2>
-        <p>We have received your application for the Senior Citizen / PWD discount.</p>
-        
-        <div style="background-color: #f8f9fa; padding: 15px; border-left: 4px solid #005a9c; margin: 20px 0;">
-          <strong>What happens next?</strong><br>
-          Please wait for a Mediko representative to reach out to you via Email, SMS, or Call.
-          <p>Standard processing time is <strong>3 to 5 business days</strong>.</p>
-        </div>
-
-        <p><strong>Application Details:</strong><br>
-        ID Number: ${id_number}<br>
-        Reference ID: #${insertId}</p> <p>Stay healthy!<br><strong>Mediko.ph Team</strong></p>
-      </div>
-    `,
+    subject: received.subject,
+    text: received.text,
+    html: received.html,
   };
 
   const adminMail = {
@@ -965,69 +953,6 @@ async function untagCustomerIfUnused(id, customerGid, tag) {
 }
 
 // ── Approval email ────────────────────────────────────────────────────────────
-async function sendApprovalEmail(applicant) {
-  // Discount codes are discontinued; this only confirms the approval.
-  const mail = {
-    from: `"Mediko.ph" <${process.env.MAIL_FROM}>`,
-    to: applicant.email_address,
-    subject: "Your Mediko.ph Senior/PWD application is approved",
-    html: `
-      <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
-        <h2 style="color: #2c3e50;">Hello ${escapeHtml(applicant.full_name)},</h2>
-        <p>Good news — your Senior Citizen / PWD application on Mediko.ph has been <strong>approved</strong>.</p>
-        <p>If you have any questions, just reply to this email.</p>
-        <p>Stay healthy!<br><strong>Mediko.ph Team</strong></p>
-      </div>
-    `,
-  };
-
-  try {
-    await transporter.sendMail(mail);
-    log("info", "approval_email_sent", { appId: applicant.id });
-  } catch (err) {
-    log("error", "approval_email_failed", {
-      appId: applicant.id,
-      message: err.message,
-    });
-  }
-}
-
-async function sendRejectionEmail(applicant, reason) {
-  const reasonHtml = reason
-    ? `<div style="background-color: #fef2f2; border: 1px solid #dc2626; padding: 15px; border-radius: 8px; margin: 20px 0;">
-         <strong style="color: #991b1b;">Reason:</strong>
-         <pre style="white-space: pre-wrap; font-family: inherit; margin: 8px 0 0 0; color: #7f1d1d;">${escapeHtml(reason)}</pre>
-       </div>`
-    : "";
-
-  const mail = {
-    from: `"Mediko.ph" <${process.env.MAIL_FROM}>`,
-    to: applicant.email_address,
-    subject: "Update on your Mediko.ph Senior/PWD discount application",
-    html: `
-      <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
-        <h2 style="color: #2c3e50;">Hello ${escapeHtml(applicant.full_name)},</h2>
-        <p>Thank you for applying for the Senior Citizen / PWD discount on Mediko.ph.</p>
-        <p>After reviewing your submission, we are unable to approve your application at this time.</p>
-        ${reasonHtml}
-        <p>If you believe this was a mistake or need help, please reply to this email or contact our support team and we'll be happy to assist.</p>
-        <p>Reference ID: #${applicant.id}</p>
-        <p>Stay healthy,<br><strong>Mediko.ph Team</strong></p>
-      </div>
-    `,
-  };
-
-  try {
-    await transporter.sendMail(mail);
-    log("info", "rejection_email_sent", { appId: applicant.id });
-  } catch (err) {
-    log("error", "rejection_email_failed", {
-      appId: applicant.id,
-      message: err.message,
-    });
-  }
-}
-
 // ── Contact / Returns email helpers ───────────────────────────────────────────
 function metaTable(meta) {
   return `
@@ -1058,22 +983,13 @@ async function sendContactEmails(submission, metadataStr) {
     meta = {};
   }
 
+  const received = renderEmail("contact_received", recordVars("contact", submission));
   const userMail = {
     from: `"Mediko.ph" <${process.env.MAIL_FROM}>`,
     to: email_address,
-    subject: "We've received your message — Mediko.ph",
-    html: `
-      <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
-        <h2 style="color: #2c3e50;">Hello ${escapeHtml(full_name)},</h2>
-        <p>Thanks for reaching out. We've received your message and a Mediko representative will get back to you within <strong>1–2 business days</strong>.</p>
-        <div style="background-color: #f8f9fa; padding: 15px; border-left: 4px solid #005a9c; margin: 20px 0;">
-          <strong>Your message:</strong><br>
-          <pre style="white-space: pre-wrap; font-family: inherit; margin: 8px 0 0 0;">${escapeHtml(message)}</pre>
-        </div>
-        <p>Reference ID: #${id}</p>
-        <p>Stay healthy!<br><strong>Mediko.ph Team</strong></p>
-      </div>
-    `,
+    subject: received.subject,
+    text: received.text,
+    html: received.html,
   };
 
   const adminMail = {
@@ -1126,26 +1042,13 @@ async function sendReturnEmails(returnReq, files, metadataStr) {
     ? files.map((f) => ({ filename: f.originalname, path: f.path }))
     : [];
 
+  const received = renderEmail("return_received", recordVars("return", returnReq));
   const userMail = {
     from: `"Mediko.ph" <${process.env.MAIL_FROM}>`,
     to: email_address,
-    subject: `Return request received #${id} — Mediko.ph`,
-    html: `
-      <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
-        <h2 style="color: #2c3e50;">Hello ${escapeHtml(full_name)},</h2>
-        <p>We've received your return request for order <strong>${escapeHtml(order_number)}</strong>.</p>
-        <div style="background-color: #f8f9fa; padding: 15px; border-left: 4px solid #005a9c; margin: 20px 0;">
-          <strong>What happens next?</strong><br>
-          A Mediko representative will review your request and reach out with next steps.
-          <p>Standard processing time is <strong>3 to 5 business days</strong>.</p>
-        </div>
-        <p><strong>Request Details:</strong><br>
-        Reference ID: #${id}<br>
-        Order: ${escapeHtml(order_number)}<br>
-        Items: ${escapeHtml(items_to_return)}</p>
-        <p>Stay healthy!<br><strong>Mediko.ph Team</strong></p>
-      </div>
-    `,
+    subject: received.subject,
+    text: received.text,
+    html: received.html,
   };
 
   const adminMail = {
@@ -1177,64 +1080,6 @@ async function sendReturnEmails(returnReq, files, metadataStr) {
     log("info", "return_emails_sent", { id });
   } catch (err) {
     log("error", "return_email_failed", { id, message: err.message });
-  }
-}
-
-async function sendReturnApprovalEmail(returnReq) {
-  const mail = {
-    from: `"Mediko.ph" <${process.env.MAIL_FROM}>`,
-    to: returnReq.email_address,
-    subject: `Your return request #${returnReq.id} has been approved`,
-    html: `
-      <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
-        <h2 style="color: #2c3e50;">Hello ${escapeHtml(returnReq.full_name)},</h2>
-        <p>Good news — your return request for order <strong>${escapeHtml(returnReq.order_number)}</strong> has been <strong>approved</strong>.</p>
-        <div style="background-color: #f0fdf4; border: 1px solid #16a34a; padding: 20px; border-radius: 8px; margin: 20px 0;">
-          A Mediko representative will reach out shortly with shipping and refund instructions.
-        </div>
-        <p>Reference ID: #${returnReq.id}</p>
-        <p>Thank you,<br><strong>Mediko.ph Team</strong></p>
-      </div>
-    `,
-  };
-  try {
-    await transporter.sendMail(mail);
-    log("info", "return_approval_email_sent", { id: returnReq.id });
-  } catch (err) {
-    log("error", "return_approval_email_failed", { id: returnReq.id, message: err.message });
-  }
-}
-
-async function sendReturnRejectionEmail(returnReq, reason) {
-  const reasonHtml = reason
-    ? `<div style="background-color: #fef2f2; border: 1px solid #dc2626; padding: 15px; border-radius: 8px; margin: 20px 0;">
-         <strong style="color: #991b1b;">Reason:</strong>
-         <pre style="white-space: pre-wrap; font-family: inherit; margin: 8px 0 0 0; color: #7f1d1d;">${escapeHtml(reason)}</pre>
-       </div>`
-    : "";
-
-  const mail = {
-    from: `"Mediko.ph" <${process.env.MAIL_FROM}>`,
-    to: returnReq.email_address,
-    subject: `Update on your return request #${returnReq.id} — Mediko.ph`,
-    html: `
-      <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
-        <h2 style="color: #2c3e50;">Hello ${escapeHtml(returnReq.full_name)},</h2>
-        <p>Thank you for submitting a return request for order <strong>${escapeHtml(returnReq.order_number)}</strong>.</p>
-        <p>After reviewing your request, we are unable to approve this return at this time.</p>
-        ${reasonHtml}
-        <p>If you have questions or believe this was made in error, please reply to this email or contact our support team.</p>
-        <p>Reference ID: #${returnReq.id}</p>
-        <p>Thank you,<br><strong>Mediko.ph Team</strong></p>
-      </div>
-    `,
-  };
-
-  try {
-    await transporter.sendMail(mail);
-    log("info", "return_rejection_email_sent", { id: returnReq.id });
-  } catch (err) {
-    log("error", "return_rejection_email_failed", { id: returnReq.id, message: err.message });
   }
 }
 
@@ -1767,31 +1612,381 @@ app.get("/api/submissions", requireAdmin, (req, res) => {
 });
 
 // ── PATCH /api/submissions/:id/status ────────────────────────────────────────
+// ── Message templates (customer emails + SMS) ─────────────────────────────────
+// Wording lives here as defaults and can be overridden from the portal's
+// Templates page (message_templates table). Syntax:
+//   {{var}}        replaced with the value
+//   [[ ... ]]      optional part: dropped when any {{var}} inside it is empty
+//   blank line     new paragraph (email); **bold** works in emails
+// Everything is HTML-escaped before formatting, so templates can't inject markup.
+const SIGNOFF = "Stay healthy!\n**Mediko.ph Team**";
+const TEMPLATES = {
+  application_received: {
+    group: "Senior/PWD", name: "Application received", channel: "email",
+    vars: ["name", "first_name", "id_number", "reference_id"],
+    subject: "Application received — Mediko.ph",
+    body: `Hello {{name}},
+
+We have received your application for the Senior Citizen / PWD discount.
+
+**What happens next?**
+Please wait for a Mediko representative to reach out to you via email, SMS or call. Standard processing time is **3 to 5 business days**.
+
+ID number: {{id_number}}
+Reference ID: #{{reference_id}}
+
+${SIGNOFF}`,
+  },
+  application_approved: {
+    group: "Senior/PWD", name: "Application approved", channel: "email",
+    vars: ["name", "first_name", "id_number", "reference_id"],
+    subject: "Your Mediko.ph Senior/PWD application is approved",
+    body: `Hello {{name}},
+
+Good news — your Senior Citizen / PWD application on Mediko.ph has been **approved**.
+
+If you have any questions, just reply to this email.
+
+${SIGNOFF}`,
+  },
+  application_rejected: {
+    group: "Senior/PWD", name: "Application rejected", channel: "email",
+    vars: ["name", "first_name", "id_number", "reference_id", "reason"],
+    subject: "Update on your Mediko.ph Senior/PWD application",
+    body: `Hello {{name}},
+
+Thank you for applying for the Senior Citizen / PWD discount on Mediko.ph.
+
+After reviewing your submission, we are unable to approve your application at this time.
+[[
+**Reason:** {{reason}}
+]]
+If you believe this was a mistake or need help, please reply to this email and we'll be happy to assist.
+
+Reference ID: #{{reference_id}}
+
+${SIGNOFF}`,
+  },
+  application_approved_sms: {
+    group: "Senior/PWD", name: "Application approved (SMS)", channel: "sms",
+    vars: ["first_name", "reference_id"],
+    body: "Mediko: Hi {{first_name}}, your Senior/PWD application is approved. Thank you for choosing Mediko.ph!",
+  },
+  application_rejected_sms: {
+    group: "Senior/PWD", name: "Application rejected (SMS)", channel: "sms",
+    vars: ["first_name", "reference_id"],
+    body: "Mediko: Hi {{first_name}}, we couldn't approve your Senior/PWD application. Please check your email for details.",
+  },
+  return_received: {
+    group: "Returns", name: "Return request received", channel: "email",
+    vars: ["name", "first_name", "order", "items", "reference_id"],
+    subject: "Return request received #{{reference_id}} — Mediko.ph",
+    body: `Hello {{name}},
+
+We've received your return request for order **{{order}}**.
+
+**What happens next?**
+A Mediko representative will review your request and reach out with next steps. Standard processing time is **3 to 5 business days**.
+
+Reference ID: #{{reference_id}}
+Order: {{order}}
+Items: {{items}}
+
+${SIGNOFF}`,
+  },
+  return_approved: {
+    group: "Returns", name: "Return approved", channel: "email",
+    vars: ["name", "first_name", "order", "items", "reference_id"],
+    subject: "Your return request #{{reference_id}} has been approved",
+    body: `Hello {{name}},
+
+Good news — your return request for order **{{order}}** has been **approved**.
+
+A Mediko representative will reach out shortly with shipping and refund instructions.
+
+Reference ID: #{{reference_id}}
+
+Thank you,
+**Mediko.ph Team**`,
+  },
+  return_rejected: {
+    group: "Returns", name: "Return rejected", channel: "email",
+    vars: ["name", "first_name", "order", "items", "reference_id", "reason"],
+    subject: "Update on your return request #{{reference_id}} — Mediko.ph",
+    body: `Hello {{name}},
+
+Thank you for submitting a return request for order **{{order}}**.
+
+After reviewing your request, we are unable to approve this return at this time.
+[[
+**Reason:** {{reason}}
+]]
+If you have questions or believe this was made in error, please reply to this email.
+
+Reference ID: #{{reference_id}}
+
+Thank you,
+**Mediko.ph Team**`,
+  },
+  return_approved_sms: {
+    group: "Returns", name: "Return approved (SMS)", channel: "sms",
+    vars: ["first_name", "order", "reference_id"],
+    body: "Mediko: Hi {{first_name}}, your return request for order {{order}} is approved. We'll email you the next steps.",
+  },
+  return_rejected_sms: {
+    group: "Returns", name: "Return rejected (SMS)", channel: "sms",
+    vars: ["first_name", "order", "reference_id"],
+    body: "Mediko: Hi {{first_name}}, your return request for order {{order}} wasn't approved. Please check your email for details.",
+  },
+  contact_received: {
+    group: "Messages", name: "Message received", channel: "email",
+    vars: ["name", "first_name", "message", "reference_id"],
+    subject: "We've received your message — Mediko.ph",
+    body: `Hello {{name}},
+
+Thanks for reaching out. We've received your message and a Mediko representative will get back to you within **1–2 business days**.
+
+**Your message:**
+{{message}}
+
+Reference ID: #{{reference_id}}
+
+${SIGNOFF}`,
+  },
+  shipping_sms: {
+    group: "Shipping", name: "Order shipped (SMS)", channel: "sms",
+    vars: ["order", "courier", "tracking", "link"],
+    body: "Mediko: Your order {{order}} has shipped[[ via {{courier}}]].[[ Tracking no: {{tracking}}.]][[ Track: {{link}}]]",
+  },
+};
+
+const TEMPLATE_LIMITS = { subject: 200, email: 10000, sms: 459 };
+let templateCache = {}; // key → { subject, body } saved overrides
+
+async function ensureTemplatesTable() {
+  try {
+    await queryAsync(
+      `CREATE TABLE IF NOT EXISTS message_templates (
+         template_key VARCHAR(64) PRIMARY KEY,
+         subject TEXT NULL,
+         body TEXT NOT NULL,
+         updated_by VARCHAR(120) NULL,
+         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+       )`,
+    );
+    await loadTemplates();
+    log("info", "migration_templates_table_ready", { saved: Object.keys(templateCache).length });
+  } catch (err) {
+    log("error", "migration_templates_table_failed", { message: err.message });
+  }
+}
+
+async function loadTemplates() {
+  const rows = await queryAsync("SELECT template_key, subject, body FROM message_templates");
+  const next = {};
+  for (const r of rows) if (TEMPLATES[r.template_key]) next[r.template_key] = { subject: r.subject, body: r.body };
+  templateCache = next;
+}
+
+function getTemplate(key) {
+  const def = TEMPLATES[key];
+  const saved = templateCache[key];
+  return {
+    subject: def.channel === "email" ? (saved?.subject ?? def.subject) : null,
+    body: saved?.body ?? def.body,
+    saved: Boolean(saved),
+  };
+}
+
+// Fills {{vars}} and resolves [[optional]] parts. `keep` lists vars to leave
+// as placeholders (the confirm dialog fills {{reason}} only at send time).
+function fillTemplate(text, vars, keep = []) {
+  const val = (k) => (vars[k] == null ? "" : String(vars[k]));
+  const withOptional = String(text || "").replace(/\[\[([\s\S]*?)\]\]/g, (_, seg) => {
+    const names = [...seg.matchAll(/\{\{\s*(\w+)\s*\}\}/g)].map((m) => m[1]);
+    return names.every((n) => keep.includes(n) || val(n).trim()) ? seg : "";
+  });
+  return withOptional.replace(/\{\{\s*(\w+)\s*\}\}/g, (m, k) => (keep.includes(k) ? m : val(k)));
+}
+
+// Plain text → simple HTML email.
+function templateHtml(text) {
+  const paras = escapeHtml(text.trim())
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .split(/\n{2,}/)
+    .map((p) => `<p style="margin: 0 0 16px 0;">${p.trim().replace(/\n/g, "<br>")}</p>`)
+    .join("");
+  return `<div style="font-family: sans-serif; line-height: 1.6; color: #333; max-width: 600px;">${paras}</div>`;
+}
+
+function renderEmail(key, vars, override = {}) {
+  const t = getTemplate(key);
+  const subject = fillTemplate(override.subject ?? t.subject, vars).replace(/\s+/g, " ").trim();
+  const text = fillTemplate(override.body ?? t.body, vars).replace(/\n{3,}/g, "\n\n").trim();
+  return { subject, text, html: templateHtml(text) };
+}
+
+// SMS: ASCII only. Shipping texts drop the tracking link rather than pay for
+// a second credit; other texts may run to 3 parts (the editor shows the cost).
+function renderSms(key, vars, override) {
+  const body = override ?? getTemplate(key).body;
+  let text = toSmsText(fillTemplate(body, vars).replace(/\s+/g, " "));
+  if (key === "shipping_sms" && text.length > 160 && vars.link) {
+    text = toSmsText(fillTemplate(body, { ...vars, link: "" }).replace(/\s+/g, " "));
+  }
+  return text.slice(0, TEMPLATE_LIMITS.sms);
+}
+
+async function sendTemplateEmail(key, to, vars, override, logCtx = {}) {
+  const { subject, text, html } = renderEmail(key, vars, override);
+  try {
+    await transporter.sendMail({ from: `"Mediko.ph" <${process.env.MAIL_FROM}>`, to, subject, text, html });
+    log("info", "template_email_sent", { template: key, ...logCtx });
+    return true;
+  } catch (err) {
+    log("error", "template_email_failed", { template: key, ...logCtx, message: err.message });
+    return false;
+  }
+}
+
+// Variables available for each kind of record.
+function recordVars(kind, row, extra = {}) {
+  const full = String(row.full_name || "").trim();
+  const base = {
+    name: full,
+    first_name: full.split(/\s+/)[0] || "there",
+    reference_id: row.id,
+  };
+  if (kind === "application") Object.assign(base, { id_number: row.id_number });
+  if (kind === "return") Object.assign(base, { order: row.order_number, items: row.items_to_return });
+  if (kind === "contact") Object.assign(base, { message: row.message });
+  return { ...base, ...extra };
+}
+
+function validateTemplateInput(def, input) {
+  const body = typeof input?.body === "string" ? input.body.replace(/\r\n/g, "\n") : "";
+  if (!body.trim()) return { error: "Message can't be empty." };
+  const limit = def.channel === "sms" ? TEMPLATE_LIMITS.sms : TEMPLATE_LIMITS.email;
+  if (body.length > limit) return { error: `Message is over ${limit} characters.` };
+  if (def.channel === "email") {
+    const subject = typeof input?.subject === "string" ? input.subject.trim() : "";
+    if (!subject) return { error: "Subject can't be empty." };
+    if (subject.length > TEMPLATE_LIMITS.subject) return { error: `Subject is over ${TEMPLATE_LIMITS.subject} characters.` };
+    return { subject, body };
+  }
+  return { subject: null, body };
+}
+
+// ── /api/templates (admin) ────────────────────────────────────────────────────
+app.get("/api/templates", requireAdmin, (_req, res) => {
+  res.json({
+    templates: Object.entries(TEMPLATES).map(([key, def]) => {
+      const t = getTemplate(key);
+      return {
+        key, group: def.group, name: def.name, channel: def.channel, vars: def.vars,
+        subject: t.subject, body: t.body, saved: t.saved,
+        defaultSubject: def.subject || null, defaultBody: def.body,
+      };
+    }),
+  });
+});
+
+app.put("/api/templates", requireAdmin, async (req, res) => {
+  const input = req.body && typeof req.body.templates === "object" ? req.body.templates : null;
+  if (!input || !Object.keys(input).length) return res.status(400).json({ error: "Nothing to save." });
+  const rows = [];
+  const errors = [];
+  for (const [key, val] of Object.entries(input)) {
+    const def = TEMPLATES[key];
+    if (!def) { errors.push(`${key}: unknown template`); continue; }
+    const v = validateTemplateInput(def, val);
+    if (v.error) errors.push(`${def.name}: ${v.error}`);
+    else rows.push([key, v.subject, v.body]);
+  }
+  if (errors.length) return res.status(400).json({ error: errors.join("; ") });
+  try {
+    for (const [key, subject, body] of rows) {
+      await queryAsync(
+        `INSERT INTO message_templates (template_key, subject, body, updated_by) VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE subject = VALUES(subject), body = VALUES(body), updated_by = VALUES(updated_by)`,
+        [key, subject, body, adminName(req)],
+      );
+    }
+    await loadTemplates();
+    log("info", "templates_saved", { keys: rows.map((r) => r[0]), ip: req.ip });
+    res.json({ success: true });
+  } catch (err) {
+    log("error", "templates_save_failed", { message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/api/templates/:key", requireAdmin, async (req, res) => {
+  if (!TEMPLATES[req.params.key]) return res.status(404).json({ error: "Unknown template" });
+  try {
+    await queryAsync("DELETE FROM message_templates WHERE template_key = ?", [req.params.key]);
+    await loadTemplates();
+    log("info", "template_reset", { key: req.params.key, ip: req.ip });
+    res.json({ success: true });
+  } catch (err) {
+    log("error", "template_reset_failed", { message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Fills a decision template for one record, leaving {{reason}} for send time,
+// so the confirm dialog can show (and let staff edit) the real wording.
+const DECISION_RECORDS = { applications: ["applications", "application"], returns: ["return_requests", "return"] };
+app.get("/api/templates/fill/:kind/:id/:status", requireAdmin, async (req, res) => {
+  const rec = DECISION_RECORDS[req.params.kind];
+  const status = req.params.status;
+  if (!rec || !["approved", "rejected"].includes(status)) return res.status(400).json({ error: "Invalid request" });
+  const [table, kind] = rec;
+  try {
+    const rows = await queryAsync(`SELECT * FROM ${table} WHERE id = ?`, [parseInt(req.params.id, 10)]);
+    if (!rows.length) return res.status(404).json({ error: "Not found" });
+    const vars = recordVars(kind, rows[0]);
+    const key = `${kind}_${status}`;
+    const t = getTemplate(key);
+    res.json({
+      email: {
+        subject: fillTemplate(t.subject, vars, ["reason"]).replace(/\s+/g, " ").trim(),
+        body: fillTemplate(t.body, vars, ["reason"]).replace(/\n{3,}/g, "\n\n").trim(),
+      },
+      sms: toSmsText(fillTemplate(getTemplate(`${key}_sms`).body, vars).replace(/\s+/g, " ")),
+    });
+  } catch (err) {
+    log("error", "template_fill_failed", { message: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── Customer notifications on approve / reject ────────────────────────────────
-// The portal sends { notify: { email, sms } } with each decision. Email
-// defaults to on (the old behavior); SMS is opt-in because it costs a credit.
+// The portal sends { notify: { email, sms, email_subject?, email_body?, sms_text? } }
+// with each decision. Email defaults to on (the old behavior); SMS is opt-in
+// because it costs a credit. Overrides are this-send-only edits of the
+// template text (placeholders still work in them).
 function parseNotify(body) {
   const n = body && typeof body.notify === "object" && body.notify ? body.notify : {};
-  return { email: n.email !== false, sms: n.sms === true };
+  const str = (v, max) => (typeof v === "string" && v.trim() ? v.replace(/\r\n/g, "\n").slice(0, max) : undefined);
+  return {
+    email: n.email !== false,
+    sms: n.sms === true,
+    emailOverride: { subject: str(n.email_subject, TEMPLATE_LIMITS.subject), body: str(n.email_body, TEMPLATE_LIMITS.email) },
+    smsOverride: str(n.sms_text, TEMPLATE_LIMITS.sms),
+  };
 }
 
-function firstName(full) {
-  return toSmsText(String(full || "").trim().split(/\s+/)[0]) || "there";
-}
-
-// Short decision texts; detail (reasons, next steps) stays in the email.
-function decisionSms(kind, status, row) {
-  const hi = `Mediko: Hi ${firstName(row.full_name)},`;
-  if (kind === "application") {
-    if (status === "approved") {
-      return `${hi} your Senior/PWD application is approved. Thank you for choosing Mediko.ph!`;
-    }
-    return `${hi} we couldn't approve your Senior/PWD application. Please check your email for details.`;
-  }
-  const order = toSmsText(row.order_number);
-  return status === "approved"
-    ? `${hi} your return request for order ${order} is approved. We'll email you the next steps.`
-    : `${hi} your return request for order ${order} wasn't approved. Please check your email for details.`;
+// Sends the decision email/SMS for one record; returns { email, sms } as reported to the portal.
+async function notifyDecision(kind, status, row, reason, notify) {
+  const vars = recordVars(kind, row, { reason });
+  const key = `${kind}_${status}`;
+  const ctx = { id: row.id, kind };
+  if (notify.email) sendTemplateEmail(key, row.email_address, vars, notify.emailOverride, ctx);
+  const sms = notify.sms
+    ? await sendDecisionSms(row.contact_number, renderSms(`${key}_sms`, vars, notify.smsOverride), ctx)
+    : "off";
+  return { email: notify.email, sms };
 }
 
 // Returns "sent", "skipped: <why>" or "failed: <why>". Never throws.
@@ -1800,7 +1995,7 @@ async function sendDecisionSms(phoneRaw, message, ctx) {
   const phone = normalizePhMobile(phoneRaw);
   if (!phone) return "skipped: not a valid PH mobile number";
   try {
-    const text = toSmsText(message).slice(0, 160);
+    const text = toSmsText(message).slice(0, TEMPLATE_LIMITS.sms);
     const sent = await sendSemaphoreSms(phone, text);
     log("info", "decision_sms_sent", { ...ctx, messageId: sent.message_id });
     return "sent";
@@ -1848,11 +2043,8 @@ app.patch("/api/submissions/:id/status", requireAdmin, async (req, res) => {
         [id],
       );
       log("info", "submission_approved", { id, ip: req.ip });
-      if (notify.email) sendApprovalEmail(applicant);
-      const sms = notify.sms
-        ? await sendDecisionSms(applicant.contact_number, decisionSms("application", "approved", applicant), { id, kind: "application" })
-        : "off";
-      return res.json({ success: true, id, status: "approved", notified: { email: notify.email, sms } });
+      const notified = await notifyDecision("application", "approved", applicant, "", notify);
+      return res.json({ success: true, id, status: "approved", notified });
     }
 
     const wasRejected = applicant.status === "rejected";
@@ -1863,13 +2055,7 @@ app.patch("/api/submissions/:id/status", requireAdmin, async (req, res) => {
 
     let notified = { email: false, sms: "off" };
     if (status === "rejected" && !wasRejected) {
-      if (notify.email) sendRejectionEmail(applicant, trimmedReason);
-      notified = {
-        email: notify.email,
-        sms: notify.sms
-          ? await sendDecisionSms(applicant.contact_number, decisionSms("application", "rejected", applicant), { id, kind: "application" })
-          : "off",
-      };
+      notified = await notifyDecision("application", "rejected", applicant, trimmedReason, notify);
     }
 
     log("info", "submission_status_updated", { id, status, notified, ip: req.ip });
@@ -2604,16 +2790,7 @@ app.patch("/api/return-requests/:id/status", requireAdmin, async (req, res) => {
       (status === "approved" && returnReq.status !== "approved")
       || (status === "rejected" && !wasRejected);
     if (decided) {
-      if (notify.email) {
-        if (status === "approved") sendReturnApprovalEmail(returnReq);
-        else sendReturnRejectionEmail(returnReq, trimmedReason);
-      }
-      notified = {
-        email: notify.email,
-        sms: notify.sms
-          ? await sendDecisionSms(returnReq.contact_number, decisionSms("return", status, returnReq), { id, kind: "return" })
-          : "off",
-      };
+      notified = await notifyDecision("return", status, returnReq, status === "rejected" ? trimmedReason : "", notify);
     }
 
     res.json({ success: true, id, status, notified });
@@ -3182,7 +3359,6 @@ app.post("/api/unsubscribe", express.urlencoded({ extended: false }), async (req
 // The Semaphore API key is a secret, so it comes only from SEMAPHORE_API_KEY in
 // .env. On/off and sender name are portal settings (see SETTINGS).
 const SEMAPHORE_BASE = "https://api.semaphore.co/api/v4";
-const SMS_MAX_LEN = 160; // one Semaphore credit per 160 GSM characters
 
 function getSmsConfig() {
   return {
@@ -3265,14 +3441,9 @@ function toSmsText(str) {
 }
 
 function buildShippingSms({ orderName, company, trackingNumber, trackingUrl }) {
-  let msg = `Mediko: Your order ${orderName} has shipped`;
-  if (company) msg += ` via ${company}`;
-  msg += ".";
-  if (trackingNumber) msg += ` Tracking no: ${trackingNumber}.`;
-  const withUrl = trackingUrl ? `${msg} Track: ${trackingUrl}` : msg;
-  // Drop the link rather than pay for a second credit.
-  const out = withUrl.length <= SMS_MAX_LEN ? withUrl : msg;
-  return toSmsText(out.length <= SMS_MAX_LEN ? out : out.slice(0, SMS_MAX_LEN));
+  return renderSms("shipping_sms", {
+    order: orderName, courier: company || "", tracking: trackingNumber || "", link: trackingUrl || "",
+  });
 }
 
 async function lookupOrderPhone(orderId) {

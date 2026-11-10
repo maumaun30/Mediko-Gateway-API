@@ -31,8 +31,9 @@
     <s-link href="/admin-dashboard/applications">Senior/PWD</s-link>
     <s-link href="/admin-dashboard/requests/returns">Returns</s-link>
     <s-link href="/admin-dashboard/requests/messages">Messages</s-link>
-    <s-link href="/admin-dashboard/blasts">Blasts</s-link>
+    <s-link href="/admin-dashboard/blasts">Email/SMS Blasts</s-link>
     <s-link href="/admin-dashboard/shipping-sms">Shipping SMS</s-link>
+    <s-link href="/admin-dashboard/templates">Templates</s-link>
     <s-link href="/admin-dashboard/settings">Settings</s-link>
   </s-app-nav>
 
@@ -144,8 +145,18 @@
   }
 
   // Index-table filter bar + pagination, shared by the list pages.
-  function filterBar({ searchLabel, search, from, to }) {
-    return `<s-grid slot="filters" gap="small-200" gridTemplateColumns="repeat(auto-fit, minmax(11rem, 1fr))" alignItems="end">
+  // Items per page: remembered per table in this browser (best effort).
+  const PER_PAGE_OPTIONS = [10, 20, 50, 100];
+  function perPage(table, fromUrl) {
+    const n = parseInt(fromUrl, 10);
+    if (PER_PAGE_OPTIONS.includes(n)) { try { localStorage.setItem(`per:${table}`, String(n)); } catch { /* storage off */ } return n; }
+    try { const saved = parseInt(localStorage.getItem(`per:${table}`), 10); if (PER_PAGE_OPTIONS.includes(saved)) return saved; } catch { /* storage off */ }
+    return 20;
+  }
+
+  function filterBar({ searchLabel, search, from, to, per }, slotted = true) {
+    return `<s-grid ${slotted ? 'slot="filters"' : ''} gap="small-200" gridTemplateColumns="repeat(auto-fit, minmax(11rem, 1fr))" alignItems="end">
+      ${per ? `<s-select id="f-per" label="Per page">${PER_PAGE_OPTIONS.map((n) => `<s-option value="${n}" ${n === Number(per) ? 'selected' : ''}>${n}</s-option>`).join('')}</s-select>` : ''}
       <s-search-field id="f-search" label="Search" labelAccessibilityVisibility="exclusive" placeholder="${esc(searchLabel)}" value="${esc(search)}"></s-search-field>
       <s-date-field id="f-from" label="From" value="${esc(from)}"></s-date-field>
       <s-date-field id="f-to" label="To" value="${esc(to)}"></s-date-field>
@@ -156,6 +167,7 @@
     on('f-search', 'change', (e) => apply({ search: e.currentTarget.value.trim() }));
     on('f-from', 'change', (e) => apply({ from: e.currentTarget.value }));
     on('f-to', 'change', (e) => apply({ to: e.currentTarget.value }));
+    on('f-per', 'change', (e) => apply({ per: e.currentTarget.value }));
   }
   function wirePaging(tableId, path, state, meta) {
     on(tableId, 'nextpage', () => go(withQuery(path, { ...state, page: meta.current_page + 1 })));
@@ -182,6 +194,7 @@
     [/^\/blasts\/(email|sms)\/new$/, viewBlastCreate],
     [/^\/blasts\/(email|sms)\/(\d+)$/, viewBlastDetail],
     [/^\/shipping-sms$/, viewShippingSms],
+    [/^\/templates$/, viewTemplates],
     [/^\/settings$/, viewSettings],
   ];
 
@@ -372,9 +385,10 @@
   async function viewInbox(kind) {
     const cfg = INBOX[kind];
     const q = qs();
-    const state = { status: q.get('status') || 'all', search: q.get('search') || '', from: q.get('from') || '', to: q.get('to') || '' };
+    const per = perPage(kind, q.get('per'));
+    const state = { status: q.get('status') || 'all', search: q.get('search') || '', from: q.get('from') || '', to: q.get('to') || '', per };
     const page = Math.max(1, parseInt(q.get('page'), 10) || 1);
-    const params = new URLSearchParams({ page, limit: 20 });
+    const params = new URLSearchParams({ page, limit: per });
     if (state.status !== 'all') params.set('status', state.status);
     if (state.search) params.set('search', state.search);
     if (state.from) params.set('date_from', state.from);
@@ -389,6 +403,7 @@
       const status = r.status || 'pending';
       const href = `${BASE}${cfg.path}/${r.id}`;
       return `<s-table-row clickDelegate="row-link-${r.id}">
+        <s-table-cell><s-checkbox data-sel="${r.id}" accessibilityLabel="Select ${esc(r.full_name)}"></s-checkbox></s-table-cell>
         <s-table-cell><s-stack gap="none">
           <s-link id="row-link-${r.id}" href="${href}">${esc(r.full_name)}</s-link>
           <s-text color="subdued"><span class="cell-one">${esc(r.email_address)}</span></s-text>
@@ -411,8 +426,21 @@
     const filters = filterBar({ searchLabel: cfg.searchLabel, ...state });
     const body = list.data.length
       ? `<s-section padding="none"><s-table id="inbox-table" paginate ${meta.current_page < meta.total_pages ? 'hasNextPage' : ''} ${meta.current_page > 1 ? 'hasPreviousPage' : ''}>
-          ${filters}
+          <s-stack slot="filters" gap="small">
+            <div id="filters-wrap">${filterBar({ searchLabel: cfg.searchLabel, ...state }, false)}</div>
+            <div id="bulk-bar" style="display:none"><s-box padding="small" background="strong" borderRadius="base">
+              <s-stack direction="inline" gap="base" alignItems="center" justifyContent="space-between">
+                <s-text type="strong" id="bulk-count"></s-text>
+                <s-stack direction="inline" gap="small">
+                  ${(kind === 'messages' ? [['Mark resolved', 'resolve'], ['Reopen', 'reopen']] : [['Approve', 'approve'], ['Reject…', 'reject', 'critical']])
+                    .map(([label, act, tone]) => `<s-button data-bulk="${act}" ${tone ? `tone="${tone}"` : ''}>${label}</s-button>`).join('')}
+                  <s-button variant="tertiary" id="bulk-clear">Clear</s-button>
+                </s-stack>
+              </s-stack>
+            </s-box></div>
+          </s-stack>
           <s-table-header-row>
+            <s-table-header><s-checkbox id="sel-all" accessibilityLabel="Select all on this page"></s-checkbox></s-table-header>
             <s-table-header listSlot="primary">${cfg.nameHeader}</s-table-header>
             <s-table-header>${cfg.keyHeader}</s-table-header>
             <s-table-header>${cfg.dateHeader}</s-table-header>
@@ -434,6 +462,19 @@
       ${body}
     </s-stack></s-page>
     ${decisionModal()}
+    <s-modal id="bulk-modal" heading="Confirm">
+      <s-stack gap="base">
+        <s-paragraph id="bulk-text"></s-paragraph>
+        <div id="bulk-reason-wrap"><s-text-area id="bulk-reason" label="Reason (sent to everyone selected)" rows="3"></s-text-area></div>
+        <div id="bulk-notify"><s-stack gap="small">
+          <s-text type="strong">Notify the customers</s-text>
+          <s-checkbox id="bulk-email" label="Send an email" details="Uses your saved templates." checked></s-checkbox>
+          <s-checkbox id="bulk-sms" label="Send a text (SMS)"></s-checkbox>
+        </s-stack></div>
+      </s-stack>
+      <s-button slot="primary-action" variant="primary" id="bulk-confirm">Confirm</s-button>
+      <s-button slot="secondary-actions" commandFor="bulk-modal" command="--hide">Cancel</s-button>
+    </s-modal>
     <s-modal id="revert-list-modal" heading="Revert to pending?">
       <s-stack gap="base" id="revert-list-body"></s-stack>
       <s-button slot="primary-action" variant="primary" tone="critical" id="revert-list-confirm">Revert to pending</s-button>
@@ -451,6 +492,103 @@
     };
     wireDecision();
     const okText = { applications: 'Application', returns: 'Return' };
+
+    // ── Bulk selection ──
+    const rowsById = Object.fromEntries(list.data.map((r) => [String(r.id), r]));
+    const selected = new Set();
+    const syncBulk = () => {
+      const n = selected.size;
+      byId('bulk-bar').style.display = n ? '' : 'none';
+      byId('filters-wrap').style.display = n ? 'none' : '';
+      byId('bulk-count').textContent = `${n} selected`;
+      const all = byId('sel-all');
+      if (all) { all.checked = n > 0 && n === list.data.length; all.indeterminate = n > 0 && n < list.data.length; }
+    };
+    onAll('[data-sel]', 'change', (e) => {
+      const id = e.currentTarget.dataset.sel;
+      if (e.currentTarget.checked) selected.add(id); else selected.delete(id);
+      syncBulk();
+    });
+    onAll('[data-sel]', 'click', (e) => e.stopPropagation()); // don't open the row
+    on('sel-all', 'change', (e) => {
+      const on_ = e.currentTarget.checked;
+      document.querySelectorAll('[data-sel]').forEach((cb) => {
+        cb.checked = on_;
+        if (on_) selected.add(cb.dataset.sel); else selected.delete(cb.dataset.sel);
+      });
+      syncBulk();
+    });
+    on('bulk-clear', 'click', () => {
+      selected.clear();
+      document.querySelectorAll('[data-sel]').forEach((cb) => { cb.checked = false; });
+      syncBulk();
+    });
+
+    const BULK = {
+      approve: { from: 'pending', to: 'approved', verb: 'Approve', done: 'approved' },
+      reject: { from: 'pending', to: 'rejected', verb: 'Reject', done: 'rejected' },
+      resolve: { from: 'pending', to: 'resolved', verb: 'Mark resolved', done: 'resolved' },
+      reopen: { from: 'resolved', to: 'pending', verb: 'Reopen', done: 'reopened' },
+    };
+    let bulkAct = null, bulkIds = [];
+    onAll('[data-bulk]', 'click', (e) => {
+      bulkAct = e.currentTarget.dataset.bulk;
+      const b = BULK[bulkAct];
+      bulkIds = [...selected].filter((id) => (rowsById[id].status || 'pending') === b.from);
+      const skipped = selected.size - bulkIds.length;
+      const what = kind === 'messages' ? 'message' : kind === 'returns' ? 'return' : 'application';
+      byId('bulk-modal').heading = `${b.verb} ${plural(bulkIds.length, what)}?`;
+      byId('bulk-text').textContent = bulkIds.length
+        ? `${plural(bulkIds.length, what)} will be ${b.done}.${skipped ? ` ${num(skipped)} selected ${skipped === 1 ? 'isn’t' : 'aren’t'} ${b.from}, so ${skipped === 1 ? 'it’s' : 'they’re'} skipped.` : ''}`
+        : `None of the selected ${what}s are ${b.from}, so there’s nothing to do.`;
+      const reject = bulkAct === 'reject';
+      byId('bulk-reason-wrap').style.display = reject ? '' : 'none';
+      const r = byId('bulk-reason'); r.value = ''; r.error = '';
+      const notify = kind !== 'messages' && (bulkAct === 'approve' || bulkAct === 'reject');
+      byId('bulk-notify').style.display = notify ? '' : 'none';
+      byId('bulk-email').checked = true;
+      const sm = byId('bulk-sms');
+      const textable = bulkIds.filter((id) => isPhMobile(rowsById[id].contact_number)).length;
+      sm.checked = false;
+      sm.disabled = !smsReady || !textable;
+      sm.details = !smsReady ? 'Not available: no Semaphore API key on the server.'
+        : `Uses your saved templates. ${plural(textable, 'customer')} with a valid mobile number · about ${plural(textable, 'credit')}.`;
+      const btn = byId('bulk-confirm');
+      btn.textContent = b.verb;
+      btn.disabled = !bulkIds.length;
+      if (reject) btn.setAttribute('tone', 'critical'); else btn.removeAttribute('tone');
+      showModal('bulk-modal');
+    });
+    on('bulk-confirm', 'click', async (e) => {
+      const b = BULK[bulkAct];
+      const body = { status: b.to };
+      if (bulkAct === 'reject') {
+        const r = byId('bulk-reason'); const reason = r.value.trim();
+        if (reason.length < 5) { r.error = 'Enter a reason (at least 5 characters).'; return; }
+        body.reason = reason;
+      }
+      if (kind !== 'messages' && (bulkAct === 'approve' || bulkAct === 'reject')) {
+        body.notify = { email: Boolean(byId('bulk-email').checked), sms: Boolean(byId('bulk-sms').checked) };
+      }
+      const btn = e.currentTarget; btn.loading = true;
+      let ok = 0, failed = 0, texted = 0, textFailed = 0;
+      for (const id of bulkIds) {   // one at a time: each sends its own email/SMS
+        try {
+          const res = await api(`${cfg.api}/${id}/status`, { method: 'PATCH', body });
+          ok++;
+          if (res.notified?.sms === 'sent') texted++;
+          else if (/^(failed|skipped)/.test(res.notified?.sms || '')) textFailed++;
+        } catch { failed++; }
+      }
+      btn.loading = false;
+      hideModal('bulk-modal');
+      const what = kind === 'messages' ? 'message' : kind === 'returns' ? 'return' : 'application';
+      toast(`${plural(ok, what)} ${b.done}${texted ? ` · ${num(texted)} texted` : ''}`);
+      if (failed || textFailed) {
+        setTimeout(() => toast([failed ? `${num(failed)} couldn’t be updated` : '', textFailed ? `${num(textFailed)} texts not sent` : ''].filter(Boolean).join(' · '), true), 600);
+      }
+      reload();
+    });
     let revertId = null;
     onAll('[data-act]', 'click', (e) => {
       const { act, id, name, email, phone, order } = e.currentTarget.dataset;
@@ -488,10 +626,18 @@
       <s-stack gap="base">
         <s-paragraph id="decision-text"></s-paragraph>
         <div id="decision-reason-wrap"><s-text-area id="decision-reason" label="Reason" rows="3"></s-text-area></div>
-        <div id="decision-notify"><s-stack gap="small">
+        <div id="decision-notify"><s-stack gap="base">
           <s-text type="strong">Notify the customer</s-text>
           <s-checkbox id="notify-email" label="Send an email"></s-checkbox>
+          <div id="notify-email-edit"><s-stack gap="small">
+            <s-text-field id="notify-email-subject" label="Email subject"></s-text-field>
+            <s-text-area id="notify-email-body" label="Email message" rows="8" details="From your Templates. Changes here apply to this customer only. {{reason}} is filled in from the reason above."></s-text-area>
+          </s-stack></div>
           <s-checkbox id="notify-sms" label="Send a text (SMS)"></s-checkbox>
+          <div id="notify-sms-edit"><s-stack gap="small-200">
+            <s-text-area id="notify-sms-text" label="Text message" rows="3"></s-text-area>
+            <s-text color="subdued" id="notify-sms-cost"></s-text>
+          </s-stack></div>
         </s-stack></div>
       </s-stack>
       <s-button slot="primary-action" variant="primary" id="decision-confirm">Confirm</s-button>
@@ -531,6 +677,25 @@
       : !phoneOk ? `Not available: ${phone || 'no number'} isn’t a PH mobile number.`
       : `${fmtPhone(phone)} · uses 1 credit`;
 
+    const emailEdit = byId('notify-email-edit'), smsEdit = byId('notify-sms-edit');
+    const syncEditors = () => {
+      emailEdit.style.display = notify && em.checked ? '' : 'none';
+      smsEdit.style.display = notify && sm.checked ? '' : 'none';
+    };
+    em.onchange = syncEditors; sm.onchange = syncEditors;
+    syncEditors();
+    const subj = byId('notify-email-subject'), bodyF = byId('notify-email-body'), smsF = byId('notify-sms-text');
+    const cost = () => { byId('notify-sms-cost').textContent = smsCost(smsF.value); };
+    smsF.oninput = cost;
+    subj.value = ''; bodyF.value = ''; smsF.value = ''; cost();
+    if (notify && (act === 'approve' || act === 'reject')) {
+      const status = act === 'approve' ? 'approved' : 'rejected';
+      api(`/api/templates/fill/${kind}/${opts.id}/${status}`).then((f) => {
+        if (_decision !== opts) return;
+        subj.value = f.email.subject; bodyF.value = f.email.body; smsF.value = f.sms; cost();
+      }).catch((err) => toast(`Couldn’t load the message templates: ${err.message}`, true));
+    }
+
     const btn = byId('decision-confirm');
     btn.textContent = copy[2];
     if (reject) btn.setAttribute('tone', 'critical'); else btn.removeAttribute('tone');
@@ -548,7 +713,18 @@
         body.reason = reason;
       }
       if (d.kind !== 'messages') {
-        body.notify = { email: Boolean(byId('notify-email').checked), sms: Boolean(byId('notify-sms').checked) };
+        const wantEmail = Boolean(byId('notify-email').checked), wantSms = Boolean(byId('notify-sms').checked);
+        body.notify = { email: wantEmail, sms: wantSms };
+        if (wantEmail) {
+          const subject = byId('notify-email-subject').value.trim(), text = byId('notify-email-body').value.trim();
+          if (!subject || !text) { toast('The email subject and message can’t be empty.', true); return; }
+          body.notify.email_subject = subject; body.notify.email_body = text;
+        }
+        if (wantSms) {
+          const text = byId('notify-sms-text').value.trim();
+          if (!text) { toast('The text message can’t be empty.', true); return; }
+          body.notify.sms_text = text;
+        }
       }
       const btn = e.currentTarget; btn.loading = true;
       try {
@@ -866,11 +1042,11 @@
             : '<s-text color="subdued">No opted-out numbers.</s-text>'}
         </s-stack></s-section>` : '';
 
-    $app.innerHTML = `<s-page heading="Blasts">
+    $app.innerHTML = `<s-page heading="Email/SMS Blasts">
       <s-button slot="primary-action" variant="primary" href="${BASE}/blasts/${kind}/new">Create ${isSms ? 'SMS' : 'email'} blast</s-button>
       ${isSms ? '<s-button slot="secondary-actions" commandFor="optout-modal" command="--show">Add opt-outs</s-button>' : ''}
       <s-stack gap="base">
-      ${pageTitle('Blasts')}
+      ${pageTitle('Email/SMS Blasts')}
       <s-stack direction="inline" gap="small-200">
         <s-button href="${BASE}/blasts/email" variant="${isSms ? 'secondary' : 'primary'}">Email</s-button>
         <s-button href="${BASE}/blasts/sms" variant="${isSms ? 'primary' : 'secondary'}">SMS</s-button>
@@ -956,7 +1132,7 @@
       : `<s-banner tone="warning" heading="No sender name approved yet">Only text people who agreed to hear from Mediko. Texts will come from Semaphore’s default sender. <s-link href="${BASE}/settings">Add one in Settings</s-link>.</s-banner>`) : '';
 
     $app.innerHTML = `<s-page heading="Create ${isSms ? 'SMS' : 'email'} blast">
-      <s-link slot="breadcrumb-actions" href="${BASE}/blasts/${kind}">Blasts</s-link>
+      <s-link slot="breadcrumb-actions" href="${BASE}/blasts/${kind}">Email/SMS Blasts</s-link>
       <s-button slot="primary-action" variant="primary" id="send-blast">Send blast</s-button>
       <s-stack gap="base">
       ${pageTitle(`Create ${isSms ? 'SMS' : 'email'} blast`)}
@@ -1108,7 +1284,7 @@
     const stat = (label, value) => `<s-stack gap="none"><s-text color="subdued">${esc(label)}</s-text><s-heading>${num(value)}</s-heading></s-stack>`;
 
     $app.innerHTML = `<s-page heading="${esc(title)}">
-      <s-link slot="breadcrumb-actions" href="${BASE}/blasts/${kind}">Blasts</s-link>
+      <s-link slot="breadcrumb-actions" href="${BASE}/blasts/${kind}">Email/SMS Blasts</s-link>
       ${badge(b.status, 'accessory')}
       ${b.status === 'interrupted' ? '<s-button slot="primary-action" variant="primary" id="resume-btn">Resume</s-button>' : ''}
       ${canCancel ? '<s-button slot="secondary-actions" commandFor="cancel-modal" command="--show">Cancel blast</s-button>' : ''}
@@ -1267,6 +1443,136 @@
         hideModal('sendto-modal'); toast(`Text sent to ${fmtPhone(f.value)}`); viewShippingSms();
       } catch (err) { if (err.status === 400) f.error = err.message; else { hideModal('sendto-modal'); toast(`Couldn’t send: ${err.message}`, true); viewShippingSms(); } }
       finally { btn.loading = false; }
+    });
+  }
+
+  // ── Templates ──────────────────────────────────────────────────────────────
+  // Same syntax as the server: {{var}}, [[optional part]], blank line = new
+  // paragraph, **bold** in emails. Previews use sample values.
+  const SAMPLE_VARS = {
+    name: 'Maria Santos', first_name: 'Maria', id_number: 'SC-034-2219', reference_id: '123',
+    order: '#MK1028', items: 'Vitamin C 500mg ×2', reason: 'The ID photo is too blurry to read.',
+    message: 'Is losartan 50mg available for delivery this week?',
+    courier: 'J&T Express', tracking: '7820 4419 0031', link: 'https://jtexpress.ph/track?no=782044190031',
+  };
+  function fillTpl(text, vars, keep = []) {
+    const val = (k) => (vars[k] == null ? '' : String(vars[k]));
+    return String(text || '')
+      .replace(/\[\[([\s\S]*?)\]\]/g, (_, seg) => {
+        const names = [...seg.matchAll(/\{\{\s*(\w+)\s*\}\}/g)].map((m) => m[1]);
+        return names.every((n) => keep.includes(n) || val(n).trim()) ? seg : '';
+      })
+      .replace(/\{\{\s*(\w+)\s*\}\}/g, (m, k) => (keep.includes(k) ? m : val(k)));
+  }
+  const previewEmail = (text) => esc(fillTpl(text, SAMPLE_VARS).replace(/\n{3,}/g, '\n\n').trim())
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  function smsCost(text) {
+    const { len, parts } = smsSegments(smsClean(text));
+    return `${num(len)} characters · ${plural(parts, 'credit')} each`;
+  }
+
+  async function viewTemplates() {
+    const { templates } = await api('/api/templates');
+    const loaded = Object.fromEntries(templates.map((t) => [t.key, { subject: t.subject, body: t.body }]));
+    const groups = [...new Set(templates.map((t) => t.group))];
+
+    const card = (t) => `<s-section heading="${esc(t.name)}">
+      <s-stack gap="base">
+        <s-stack direction="inline" gap="small" alignItems="center">
+          <s-badge tone="${t.channel === 'sms' ? 'info' : 'neutral'}">${t.channel === 'sms' ? 'SMS' : 'Email'}</s-badge>
+          <s-badge tone="${t.saved ? 'success' : 'neutral'}">${t.saved ? 'Edited' : 'Default'}</s-badge>
+          ${t.saved ? `<s-button variant="tertiary" data-reset="${t.key}" data-name="${esc(t.name)}">Reset to default</s-button>` : ''}
+        </s-stack>
+        ${t.channel === 'email' ? `<s-text-field id="tpl-subject-${t.key}" label="Subject" value="${esc(t.subject)}" maxLength="200"></s-text-field>` : ''}
+        <s-text-area id="tpl-body-${t.key}" label="${t.channel === 'email' ? 'Message' : 'Text'}" rows="${t.channel === 'email' ? 12 : 3}" value="${esc(t.body)}"></s-text-area>
+        <s-stack direction="inline" gap="small-200" alignItems="center">
+          <s-text color="subdued">Placeholders:</s-text>
+          ${t.vars.map((v) => `<s-badge>{{${esc(v)}}}</s-badge>`).join('')}
+        </s-stack>
+        <s-box padding="base" background="subdued" borderRadius="base">
+          <s-stack gap="small-200">
+            <s-text color="subdued">Preview with sample details${t.channel === 'sms' ? ` · <span id="tpl-cost-${t.key}"></span>` : ''}</s-text>
+            ${t.channel === 'email' ? `<s-text type="strong" id="tpl-prev-subject-${t.key}"></s-text>` : ''}
+            <div class="prewrap" id="tpl-prev-${t.key}"></div>
+          </s-stack>
+        </s-box>
+      </s-stack>
+    </s-section>`;
+
+    $app.innerHTML = `<form id="tpl-form" data-save-bar data-discard-confirmation>
+      <s-page heading="Templates"><s-stack gap="base">
+        ${pageTitle('Templates')}
+        <s-banner tone="info" heading="How templates work">
+          Type <s-text type="strong">{{first_name}}</s-text>-style placeholders to fill in each customer’s details.
+          Text inside <s-text type="strong">[[ ]]</s-text> is left out when a placeholder in it is empty.
+          In emails, a blank line starts a new paragraph and <s-text type="strong">**text**</s-text> is bold.
+          Staff can still adjust the wording for one customer in the approve/reject dialog.
+        </s-banner>
+        ${groups.map((g) => `<s-heading>${esc(g)}</s-heading>${templates.filter((t) => t.group === g).map(card).join('')}`).join('')}
+      </s-stack></s-page>
+    </form>
+    <s-modal id="tpl-reset-modal" heading="Reset to default?">
+      <s-paragraph id="tpl-reset-text"></s-paragraph>
+      <s-button slot="primary-action" variant="primary" tone="critical" id="tpl-reset-confirm">Reset</s-button>
+      <s-button slot="secondary-actions" commandFor="tpl-reset-modal" command="--hide">Cancel</s-button>
+    </s-modal>`;
+
+    const refresh = (t) => {
+      const body = byId(`tpl-body-${t.key}`).value;
+      if (t.channel === 'email') {
+        byId(`tpl-prev-subject-${t.key}`).textContent = fillTpl(byId(`tpl-subject-${t.key}`).value, SAMPLE_VARS);
+        byId(`tpl-prev-${t.key}`).innerHTML = previewEmail(body);
+      } else {
+        const text = smsClean(fillTpl(body, SAMPLE_VARS).replace(/\s+/g, ' '));
+        byId(`tpl-prev-${t.key}`).textContent = text;
+        byId(`tpl-cost-${t.key}`).textContent = smsCost(text);
+      }
+    };
+    templates.forEach((t) => {
+      refresh(t);
+      on(`tpl-body-${t.key}`, 'input', () => refresh(t));
+      if (t.channel === 'email') on(`tpl-subject-${t.key}`, 'input', () => refresh(t));
+    });
+
+    const form = byId('tpl-form');
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const changed = {};
+      templates.forEach((t) => {
+        const body = byId(`tpl-body-${t.key}`).value;
+        const subject = t.channel === 'email' ? byId(`tpl-subject-${t.key}`).value : null;
+        byId(`tpl-body-${t.key}`).error = '';
+        if (body !== loaded[t.key].body || (t.channel === 'email' && subject !== loaded[t.key].subject)) {
+          changed[t.key] = { body, subject };
+        }
+      });
+      if (!Object.keys(changed).length) { viewTemplates(); return; }
+      loading(true);
+      try {
+        await api('/api/templates', { method: 'PUT', body: { templates: changed } });
+        toast('Templates saved');
+        viewTemplates();
+      } catch (err) {
+        let matched = false;
+        err.message.split('; ').forEach((part) => {
+          const t = templates.find((x) => part.startsWith(x.name + ': '));
+          if (t) { byId(`tpl-body-${t.key}`).error = part.slice(t.name.length + 2); matched = true; }
+        });
+        toast(matched ? 'Couldn’t save: check the highlighted templates' : `Couldn’t save: ${err.message}`, true);
+      } finally { loading(false); }
+    });
+    form.addEventListener('reset', () => setTimeout(viewTemplates, 0));
+
+    let resetKey = null;
+    onAll('[data-reset]', 'click', (e) => {
+      resetKey = e.currentTarget.dataset.reset;
+      byId('tpl-reset-text').textContent = `“${e.currentTarget.dataset.name}” goes back to the original wording. Your edits are lost.`;
+      showModal('tpl-reset-modal');
+    });
+    on('tpl-reset-confirm', 'click', async () => {
+      hideModal('tpl-reset-modal');
+      try { await api(`/api/templates/${resetKey}`, { method: 'DELETE' }); toast('Template reset'); viewTemplates(); }
+      catch (err) { toast(`Couldn’t reset: ${err.message}`, true); }
     });
   }
 
