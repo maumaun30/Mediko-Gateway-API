@@ -430,16 +430,6 @@ function requireAdmin(req, res, next) {
 const EMAIL_LIST_RE = /^[^\s@,]+@[^\s@,]+\.[^\s@,]{2,}$/;
 
 const SETTINGS = {
-  discount_percentage: {
-    group: "Discounts", label: "Discount percentage", type: "number", min: 1, max: 100,
-    env: "DISCOUNT_PERCENTAGE", default: 20,
-    help: "Percent off on the single-use code sent when an application is approved.",
-  },
-  discount_autogen_enabled: {
-    group: "Discounts", label: "Create a Shopify discount code on approval", type: "boolean",
-    env: "DISCOUNT_AUTOGEN_ENABLED", default: true,
-    help: "When off, approving still works but no code or approval email is sent.",
-  },
   admin_email: {
     group: "Notifications", label: "Admin notification email", type: "email",
     env: "ADMIN_EMAIL", default: "",
@@ -871,107 +861,6 @@ function throwIfUserErrors(userErrors, op) {
   }
 }
 
-async function findOrCreateShopifyCustomer(applicant) {
-  const searchData = await shopifyGraphQL(
-    `query findCustomer($q: String!) {
-       customers(first: 1, query: $q) {
-         edges { node { id } }
-       }
-     }`,
-    { q: `email:${applicant.email_address}` },
-  );
-  const existing = searchData?.customers?.edges?.[0]?.node?.id;
-  if (existing) return existing;
-
-  const [firstName, ...rest] = (applicant.full_name || "").trim().split(/\s+/);
-  const lastName = rest.join(" ") || firstName;
-
-  const createData = await shopifyGraphQL(
-    `mutation createCustomer($input: CustomerInput!) {
-       customerCreate(input: $input) {
-         customer { id }
-         userErrors { field message }
-       }
-     }`,
-    {
-      input: {
-        email: applicant.email_address,
-        firstName,
-        lastName,
-        phone: applicant.contact_number,
-        tags: ["senior-pwd-discount"],
-      },
-    },
-  );
-
-  throwIfUserErrors(createData?.customerCreate?.userErrors, "customerCreate");
-  return createData.customerCreate.customer.id;
-}
-
-function generateDiscountCode(appId) {
-  const rand = crypto.randomBytes(4).toString("hex").toUpperCase();
-  return `MEDIKO-${appId}-${rand}`;
-}
-
-async function createDiscountForApplicant(applicant) {
-  const customerGid = await findOrCreateShopifyCustomer(applicant);
-  const code = generateDiscountCode(applicant.id);
-
-  const data = await shopifyGraphQL(
-    `mutation createDiscount($basicCodeDiscount: DiscountCodeBasicInput!) {
-       discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
-         codeDiscountNode { id }
-         userErrors { field code message }
-       }
-     }`,
-    {
-      basicCodeDiscount: {
-        title: `Mediko Senior/PWD - App #${applicant.id}`,
-        code,
-        startsAt: new Date().toISOString(),
-        customerSelection: { customers: { add: [customerGid] } },
-        customerGets: {
-          value: { percentage: getSetting("discount_percentage") / 100 },
-          items: { all: true },
-        },
-        combinesWith: {
-          productDiscounts: false,
-          orderDiscounts: true,
-          shippingDiscounts: true,
-        },
-        usageLimit: 1,
-        appliesOncePerCustomer: true,
-      },
-    },
-  );
-
-  throwIfUserErrors(
-    data?.discountCodeBasicCreate?.userErrors,
-    "discountCodeBasicCreate",
-  );
-
-  return {
-    code,
-    nodeGid: data.discountCodeBasicCreate.codeDiscountNode.id,
-  };
-}
-
-async function deleteDiscount(nodeGid) {
-  const data = await shopifyGraphQL(
-    `mutation deleteDiscount($id: ID!) {
-       discountCodeDelete(id: $id) {
-         deletedCodeDiscountId
-         userErrors { field code message }
-       }
-     }`,
-    { id: nodeGid },
-  );
-  throwIfUserErrors(
-    data?.discountCodeDelete?.userErrors,
-    "discountCodeDelete",
-  );
-}
-
 // ── Shopify order tagging (Senior/PWD) ────────────────────────────────────────
 const ORDER_TAGS = ["PWD", "SC"];
 // Refunds are a second, independent axis: an order stays PWD or SC and gains
@@ -1076,35 +965,17 @@ async function untagCustomerIfUnused(id, customerGid, tag) {
 }
 
 // ── Approval email ────────────────────────────────────────────────────────────
-async function sendApprovalEmail(applicant, code) {
+async function sendApprovalEmail(applicant) {
+  // Discount codes are discontinued; this only confirms the approval.
   const mail = {
     from: `"Mediko.ph" <${process.env.MAIL_FROM}>`,
     to: applicant.email_address,
-    subject: "Your Mediko.ph Senior/PWD Discount is Approved",
+    subject: "Your Mediko.ph Senior/PWD application is approved",
     html: `
       <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
-        <h2 style="color: #2c3e50;">Hello ${applicant.full_name},</h2>
-        <p>Good news — your Senior Citizen / PWD discount application has been <strong>approved</strong>.</p>
-
-        <div style="background-color: #f0fdf4; border: 1px solid #16a34a; padding: 20px; border-radius: 8px; margin: 20px 0; text-align: center;">
-          <p style="margin: 0 0 8px 0; color: #555;">Your personal discount code:</p>
-          <p style="margin: 0; font-size: 28px; font-weight: bold; color: #15803d; letter-spacing: 2px;">${code}</p>
-          <p style="margin: 12px 0 0 0; font-size: 13px; color: #555;">${getSetting("discount_percentage")}% off — tied to your email address.</p>
-        </div>
-
-        <div style="background-color: #fff7ed; border: 1px solid #f97316; padding: 15px; border-radius: 8px; margin: 20px 0;">
-          <strong style="color: #c2410c;">⚠️ Important:</strong>
-          <p style="margin: 8px 0 0 0; color: #7c2d12;">This code can only be used <strong>once</strong>. Please make sure your order is complete and correct before applying it at checkout. The code will expire after a single use and cannot be reissued.</p>
-        </div>
-
-        <p><strong>How to use it:</strong></p>
-        <ol>
-          <li>Add your items to the cart on <a href="https://mediko.ph">mediko.ph</a>.</li>
-          <li>At checkout, enter the email address you used to apply: <strong>${applicant.email_address}</strong>.</li>
-          <li>Paste the code <strong>${code}</strong> in the discount field and apply.</li>
-        </ol>
-
-        <p style="font-size: 13px; color: #777;">This code is permanently linked to your email. Keep this email for your records.</p>
+        <h2 style="color: #2c3e50;">Hello ${escapeHtml(applicant.full_name)},</h2>
+        <p>Good news — your Senior Citizen / PWD application on Mediko.ph has been <strong>approved</strong>.</p>
+        <p>If you have any questions, just reply to this email.</p>
         <p>Stay healthy!<br><strong>Mediko.ph Team</strong></p>
       </div>
     `,
@@ -1896,10 +1767,54 @@ app.get("/api/submissions", requireAdmin, (req, res) => {
 });
 
 // ── PATCH /api/submissions/:id/status ────────────────────────────────────────
+// ── Customer notifications on approve / reject ────────────────────────────────
+// The portal sends { notify: { email, sms } } with each decision. Email
+// defaults to on (the old behavior); SMS is opt-in because it costs a credit.
+function parseNotify(body) {
+  const n = body && typeof body.notify === "object" && body.notify ? body.notify : {};
+  return { email: n.email !== false, sms: n.sms === true };
+}
+
+function firstName(full) {
+  return toSmsText(String(full || "").trim().split(/\s+/)[0]) || "there";
+}
+
+// Short decision texts; detail (reasons, next steps) stays in the email.
+function decisionSms(kind, status, row) {
+  const hi = `Mediko: Hi ${firstName(row.full_name)},`;
+  if (kind === "application") {
+    if (status === "approved") {
+      return `${hi} your Senior/PWD application is approved. Thank you for choosing Mediko.ph!`;
+    }
+    return `${hi} we couldn't approve your Senior/PWD application. Please check your email for details.`;
+  }
+  const order = toSmsText(row.order_number);
+  return status === "approved"
+    ? `${hi} your return request for order ${order} is approved. We'll email you the next steps.`
+    : `${hi} your return request for order ${order} wasn't approved. Please check your email for details.`;
+}
+
+// Returns "sent", "skipped: <why>" or "failed: <why>". Never throws.
+async function sendDecisionSms(phoneRaw, message, ctx) {
+  if (!getSmsConfig().apiKey) return "skipped: no Semaphore API key on the server";
+  const phone = normalizePhMobile(phoneRaw);
+  if (!phone) return "skipped: not a valid PH mobile number";
+  try {
+    const text = toSmsText(message).slice(0, 160);
+    const sent = await sendSemaphoreSms(phone, text);
+    log("info", "decision_sms_sent", { ...ctx, messageId: sent.message_id });
+    return "sent";
+  } catch (err) {
+    log("error", "decision_sms_failed", { ...ctx, message: err.message });
+    return `failed: ${err.message}`;
+  }
+}
+
 app.patch("/api/submissions/:id/status", requireAdmin, async (req, res) => {
 
   const id = parseInt(req.params.id, 10);
   const { status, reason } = req.body || {};
+  const notify = parseNotify(req.body);
   if (!Number.isInteger(id) || id < 1) {
     return res.status(400).json({ error: "Invalid id" });
   }
@@ -1925,127 +1840,46 @@ app.patch("/api/submissions/:id/status", requireAdmin, async (req, res) => {
     }
     const applicant = rows[0];
 
-    // Approving a pending row: create the Shopify discount.
+    // Approving: status only. Shopify discount codes are discontinued, so
+    // nothing is created in Shopify (old code columns are left as they are).
     if (status === "approved" && applicant.status !== "approved") {
-      if (!getSetting("discount_autogen_enabled")) {
-        await queryAsync(
-          `UPDATE applications
-            SET status = 'approved', rejection_reason = NULL
-            WHERE id = ?`,
-          [id],
-        );
-        log("info", "submission_approved", {
-          id,
-          ip: req.ip,
-          autogen: false,
-        });
-        return res.json({ success: true, id, status: "approved", code: null });
-      }
-      if (!shopifyConfigured()) {
-        return res.status(503).json({
-          error:
-            "Shopify is not configured. Set SHOPIFY_SHOP_DOMAIN, plus either "
-        + "SHOPIFY_ADMIN_TOKEN or SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET.",
-        });
-      }
-      const { code, nodeGid } = await createDiscountForApplicant(applicant);
       await queryAsync(
-        `UPDATE applications
-          SET status = 'approved', discount_code = ?, discount_node_gid = ?, rejection_reason = NULL
-          WHERE id = ?`,
-        [code, nodeGid, id],
+        "UPDATE applications SET status = 'approved', rejection_reason = NULL WHERE id = ?",
+        [id],
       );
-      log("info", "submission_approved", { id, code, ip: req.ip });
-
-      // Best-effort email; don't fail the request if it bounces.
-      sendApprovalEmail(applicant, code);
-
-      return res.json({ success: true, id, status: "approved", code });
+      log("info", "submission_approved", { id, ip: req.ip });
+      if (notify.email) sendApprovalEmail(applicant);
+      const sms = notify.sms
+        ? await sendDecisionSms(applicant.contact_number, decisionSms("application", "approved", applicant), { id, kind: "application" })
+        : "off";
+      return res.json({ success: true, id, status: "approved", notified: { email: notify.email, sms } });
     }
 
     const wasRejected = applicant.status === "rejected";
+    await queryAsync(
+      "UPDATE applications SET status = ?, rejection_reason = ? WHERE id = ?",
+      [status, status === "rejected" ? trimmedReason : null, id],
+    );
 
-    // Reverting or rejecting a previously-approved row: delete the discount.
-    if (status !== "approved" && applicant.discount_node_gid) {
-      try {
-        await deleteDiscount(applicant.discount_node_gid);
-      } catch (e) {
-        log("warn", "shopify_delete_failed", {
-          id,
-          nodeGid: applicant.discount_node_gid,
-          message: e.message,
-        });
-      }
-      await queryAsync(
-        `UPDATE applications
-           SET status = ?, discount_code = NULL, discount_node_gid = NULL, rejection_reason = ?
-           WHERE id = ?`,
-        [status, status === "rejected" ? trimmedReason : null, id],
-      );
-    } else {
-      await queryAsync(
-        "UPDATE applications SET status = ?, rejection_reason = ? WHERE id = ?",
-        [status, status === "rejected" ? trimmedReason : null, id],
-      );
-    }
-
+    let notified = { email: false, sms: "off" };
     if (status === "rejected" && !wasRejected) {
-      sendRejectionEmail(applicant, trimmedReason);
+      if (notify.email) sendRejectionEmail(applicant, trimmedReason);
+      notified = {
+        email: notify.email,
+        sms: notify.sms
+          ? await sendDecisionSms(applicant.contact_number, decisionSms("application", "rejected", applicant), { id, kind: "application" })
+          : "off",
+      };
     }
 
-    log("info", "submission_status_updated", { id, status, ip: req.ip });
-    res.json({ success: true, id, status });
+    log("info", "submission_status_updated", { id, status, notified, ip: req.ip });
+    res.json({ success: true, id, status, notified });
   } catch (err) {
     log("error", "status_update_failed", {
       id,
       status,
       message: err.message,
     });
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ── GET /api/submissions/:id/discount-usage ───────────────────────────────
-app.get("/api/submissions/:id/discount-usage", requireAdmin, async (req, res) => {
-  const id = parseInt(req.params.id, 10);
-  if (!Number.isInteger(id) || id < 1) {
-    return res.status(400).json({ error: "Invalid id" });
-  }
-
-  try {
-    const rows = await queryAsync(
-      "SELECT discount_node_gid, discount_code FROM applications WHERE id = ?",
-      [id]
-    );
-    if (!rows.length) return res.status(404).json({ error: "Not found" });
-
-    const { discount_node_gid, discount_code } = rows[0];
-    if (!discount_node_gid) {
-      return res.json({ used: false, usage_count: 0, code: null });
-    }
-
-    const data = await shopifyGraphQL(
-      `query discountUsage($id: ID!) {
-         codeDiscountNode(id: $id) {
-           codeDiscount {
-             ... on DiscountCodeBasic {
-               asyncUsageCount
-             }
-           }
-         }
-       }`,
-      { id: discount_node_gid },
-    );
-
-    const usageCount =
-      data?.codeDiscountNode?.codeDiscount?.asyncUsageCount ?? 0;
-    res.json({
-      code: discount_code,
-      usage_count: usageCount,
-      used: usageCount >= 1,
-    });
-  } catch (err) {
-    log("error", "discount_usage_check_failed", { id, message: err.message });
     res.status(500).json({ error: err.message });
   }
 });
@@ -2735,6 +2569,7 @@ app.get("/api/return-requests", requireAdmin, async (req, res) => {
 app.patch("/api/return-requests/:id/status", requireAdmin, async (req, res) => {
   const id = parseInt(req.params.id, 10);
   const { status, reason } = req.body || {};
+  const notify = parseNotify(req.body);
   if (!Number.isInteger(id) || id < 1) {
     return res.status(400).json({ error: "Invalid id" });
   }
@@ -2764,14 +2599,24 @@ app.patch("/api/return-requests/:id/status", requireAdmin, async (req, res) => {
     );
     log("info", "return_status_updated", { id, status, ip: req.ip });
 
-    if (status === "approved" && returnReq.status !== "approved") {
-      sendReturnApprovalEmail(returnReq);
-    }
-    if (status === "rejected" && !wasRejected) {
-      sendReturnRejectionEmail(returnReq, trimmedReason);
+    let notified = { email: false, sms: "off" };
+    const decided =
+      (status === "approved" && returnReq.status !== "approved")
+      || (status === "rejected" && !wasRejected);
+    if (decided) {
+      if (notify.email) {
+        if (status === "approved") sendReturnApprovalEmail(returnReq);
+        else sendReturnRejectionEmail(returnReq, trimmedReason);
+      }
+      notified = {
+        email: notify.email,
+        sms: notify.sms
+          ? await sendDecisionSms(returnReq.contact_number, decisionSms("return", status, returnReq), { id, kind: "return" })
+          : "off",
+      };
     }
 
-    res.json({ success: true, id, status });
+    res.json({ success: true, id, status, notified });
   } catch (err) {
     log("error", "return_status_update_failed", { id, message: err.message });
     res.status(500).json({ error: err.message });

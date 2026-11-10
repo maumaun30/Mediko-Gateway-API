@@ -338,7 +338,7 @@
       searchLabel: 'Name, email or ID number',
       keyCell: (r) => `<span class="mono nowrap">${esc(r.id_number)}</span>`,
       tabs: (c) => [['all', 'All', c.total], ['pending', 'Pending', c.pending || 0], ['approved', 'Approved'], ['rejected', 'Rejected']],
-      empty: ['No Senior/PWD applications yet', 'SC and PWD discount applications from mediko.ph show up here.'],
+      empty: ['No Senior/PWD applications yet', 'Senior citizen and PWD applications from mediko.ph show up here.'],
       noun: 'applications',
     },
     returns: {
@@ -379,7 +379,10 @@
     if (state.search) params.set('search', state.search);
     if (state.from) params.set('date_from', state.from);
     if (state.to) params.set('date_to', state.to);
-    const [list, counts] = await Promise.all([api(`${cfg.api}?${params}`), api('/api/inbox/counts')]);
+    const [list, counts, smsStatus] = await Promise.all([
+      api(`${cfg.api}?${params}`), api('/api/inbox/counts'), api('/api/sms/settings').catch(() => null),
+    ]);
+    const smsReady = Boolean(smsStatus?.apiKeySet);
     const meta = list.metadata;
 
     const rows = list.data.map((r) => {
@@ -398,7 +401,7 @@
           <s-menu id="row-menu-${r.id}" accessibilityLabel="Actions for ${esc(r.full_name)}">
             <s-button href="${href}">View</s-button>
             ${rowActions(kind, status).map(([label, act, tone]) =>
-              `<s-button ${tone ? `tone="${tone}"` : ''} data-act="${act}" data-id="${r.id}" data-name="${esc(r.full_name)}" data-code="${esc(r.discount_code || '')}">${label}</s-button>`).join('')}
+              `<s-button ${tone ? `tone="${tone}"` : ''} data-act="${act}" data-id="${r.id}" data-name="${esc(r.full_name)}" data-email="${esc(r.email_address)}" data-phone="${esc(r.contact_number)}" data-order="${esc(r.order_number || '')}">${label}</s-button>`).join('')}
           </s-menu>
         </s-table-cell>
       </s-table-row>`;
@@ -430,7 +433,7 @@
       ${statusTabs(cfg.path, state, state.status, cfg.tabs(counts[cfg.countKey]))}
       ${body}
     </s-stack></s-page>
-    ${kind === 'messages' ? '' : rejectModal(kind === 'returns' ? 'return' : 'application')}
+    ${decisionModal()}
     <s-modal id="revert-list-modal" heading="Revert to pending?">
       <s-stack gap="base" id="revert-list-body"></s-stack>
       <s-button slot="primary-action" variant="primary" tone="critical" id="revert-list-confirm">Revert to pending</s-button>
@@ -446,19 +449,19 @@
       catch (err) { toast(`Couldn’t update: ${err.message}`, true); }
       finally { loading(false); }
     };
+    wireDecision();
     const okText = { applications: 'Application', returns: 'Return' };
     let revertId = null;
     onAll('[data-act]', 'click', (e) => {
-      const { act, id, name, code } = e.currentTarget.dataset;
-      if (act === 'approve') setStatus(id, 'approved', `${okText[kind]} approved`);
-      else if (act === 'reject') openReject(id, name);
-      else if (act === 'resolve') setStatus(id, 'resolved', 'Message resolved');
-      else if (act === 'reopen') setStatus(id, 'pending', 'Message reopened');
-      else if (act === 'revert') {
+      const { act, id, name, email, phone, order } = e.currentTarget.dataset;
+      if (act !== 'revert') {
+        openDecision({ kind, act, id, name, email, phone, order, smsReady, after: reload });
+        return;
+      }
+      {
         revertId = id;
-        byId('revert-list-body').innerHTML = kind === 'applications' && code
-          ? `<s-banner tone="warning">${esc(name)}’s discount code ${esc(code)} will be deleted. The customer can’t use it anymore. This can’t be undone.</s-banner>`
-          : `<s-paragraph>${esc(name)}’s ${kind === 'returns' ? 'return' : 'application'} goes back to the pending list.</s-paragraph>`;
+        byId('revert-list-body').innerHTML =
+          `<s-paragraph>${esc(name)}’s ${kind === 'returns' ? 'return' : 'application'} goes back to the pending list.</s-paragraph>`;
         showModal('revert-list-modal');
       }
     });
@@ -466,50 +469,111 @@
       hideModal('revert-list-modal');
       setStatus(revertId, 'pending', `${okText[kind]} set back to pending`);
     });
-    if (kind !== 'messages') {
-      wireReject(kind === 'returns' ? 'return' : 'application',
-        (id, reason) => api(`${cfg.api}/${id}/status`, { method: 'PATCH', body: { status: 'rejected', reason } }), reload);
-    }
   }
 
-  // Reject-with-reason modal, shared by applications and returns.
-  let _rejectId = null;
-  function rejectModal(kind) {
-    const what = kind === 'return' ? 'return' : 'application';
-    return `<s-modal id="reject-modal" heading="Reject ${what}?">
+  // ── Decision dialog (approve / reject / resolve / reopen) ──────────────────
+  // Every status decision goes through this one confirmation. Approve and
+  // reject on Senior/PWD and Returns also offer customer notifications:
+  // email (on by default, as before) and SMS (opt-in, 1 credit).
+  const DECISION_API = { applications: '/api/submissions', returns: '/api/return-requests', messages: '/api/contact-submissions' };
+  const isPhMobile = (p) => {
+    let d = String(p || '').replace(/\D/g, '');
+    if (d.length === 11 && d.startsWith('09')) d = '63' + d.slice(1);
+    else if (d.length === 10 && d.startsWith('9')) d = '63' + d;
+    return /^639\d{9}$/.test(d);
+  };
+
+  function decisionModal() {
+    return `<s-modal id="decision-modal" heading="Confirm">
       <s-stack gap="base">
-        <s-paragraph id="reject-intro"></s-paragraph>
-        <s-text-area id="reject-reason" label="Reason" rows="3" ${kind === 'return' ? 'details="Shown to the team on this return."' : ''}></s-text-area>
+        <s-paragraph id="decision-text"></s-paragraph>
+        <div id="decision-reason-wrap"><s-text-area id="decision-reason" label="Reason" rows="3"></s-text-area></div>
+        <div id="decision-notify"><s-stack gap="small">
+          <s-text type="strong">Notify the customer</s-text>
+          <s-checkbox id="notify-email" label="Send an email"></s-checkbox>
+          <s-checkbox id="notify-sms" label="Send a text (SMS)"></s-checkbox>
+        </s-stack></div>
       </s-stack>
-      <s-button slot="primary-action" variant="primary" tone="critical" id="reject-confirm">Reject</s-button>
-      <s-button slot="secondary-actions" commandFor="reject-modal" command="--hide">Cancel</s-button>
+      <s-button slot="primary-action" variant="primary" id="decision-confirm">Confirm</s-button>
+      <s-button slot="secondary-actions" commandFor="decision-modal" command="--hide">Cancel</s-button>
     </s-modal>`;
   }
-  function openReject(id, name) {
-    _rejectId = id;
-    const intro = byId('reject-intro');
-    if (intro) intro.textContent = name ? `${name} will be told it was not approved.` : '';
-    const f = byId('reject-reason'); if (f) { f.value = ''; f.error = ''; }
-    showModal('reject-modal');
+
+  let _decision = null;
+  // opts: { kind, act, id, name, email, phone, order, smsReady, after }
+  function openDecision(opts) {
+    _decision = opts;
+    const { kind, act, name, email, phone, order, smsReady } = opts;
+    const copy = {
+      'applications:approve': [`Approve ${name}?`, 'Their Senior/PWD application is marked approved.', 'Approve'],
+      'applications:reject': [`Reject ${name}’s application?`, 'Tell the customer why, so they know what to fix.', 'Reject'],
+      'returns:approve': ['Approve this return?', `Return for order ${order || ''} from ${name}.`, 'Approve'],
+      'returns:reject': ['Reject this return?', `Return for order ${order || ''} from ${name}. Give the reason.`, 'Reject'],
+      'messages:resolve': ['Mark this message resolved?', `From ${name}. It moves out of the pending list.`, 'Mark resolved'],
+      'messages:reopen': ['Reopen this message?', `From ${name}. It goes back to the pending list.`, 'Reopen'],
+    }[`${kind}:${act}`];
+    const modal = byId('decision-modal');
+    modal.heading = copy[0];
+    byId('decision-text').textContent = copy[1];
+
+    const reject = act === 'reject';
+    byId('decision-reason-wrap').style.display = reject ? '' : 'none';
+    const reason = byId('decision-reason'); reason.value = ''; reason.error = '';
+
+    const notify = kind !== 'messages';
+    byId('decision-notify').style.display = notify ? '' : 'none';
+    const em = byId('notify-email'), sm = byId('notify-sms');
+    em.checked = true; em.details = email || '';
+    const phoneOk = isPhMobile(phone);
+    sm.checked = false;
+    sm.disabled = !smsReady || !phoneOk;
+    sm.details = !smsReady ? 'Not available: no Semaphore API key on the server.'
+      : !phoneOk ? `Not available: ${phone || 'no number'} isn’t a PH mobile number.`
+      : `${fmtPhone(phone)} · uses 1 credit`;
+
+    const btn = byId('decision-confirm');
+    btn.textContent = copy[2];
+    if (reject) btn.setAttribute('tone', 'critical'); else btn.removeAttribute('tone');
+    showModal('decision-modal');
   }
-  function wireReject(kind, send, after) {
-    on('reject-confirm', 'click', async (e) => {
-      const f = byId('reject-reason'); const reason = f.value.trim();
-      if (reason.length < 5) { f.error = 'Enter a reason (at least 5 characters) so it’s clear what to fix.'; return; }
+
+  function wireDecision() {
+    on('decision-confirm', 'click', async (e) => {
+      const d = _decision; if (!d) return;
+      const status = { approve: 'approved', reject: 'rejected', resolve: 'resolved', reopen: 'pending' }[d.act];
+      const body = { status };
+      if (d.act === 'reject') {
+        const r = byId('decision-reason'); const reason = r.value.trim();
+        if (reason.length < 5) { r.error = 'Enter a reason (at least 5 characters).'; return; }
+        body.reason = reason;
+      }
+      if (d.kind !== 'messages') {
+        body.notify = { email: Boolean(byId('notify-email').checked), sms: Boolean(byId('notify-sms').checked) };
+      }
       const btn = e.currentTarget; btn.loading = true;
       try {
-        await send(_rejectId, reason);
-        hideModal('reject-modal');
-        toast(kind === 'return' ? 'Return rejected' : 'Application rejected');
-        after();
-      } catch (err) { f.error = err.message; }
-      finally { btn.loading = false; }
+        const res = await api(`${DECISION_API[d.kind]}/${d.id}/status`, { method: 'PATCH', body });
+        hideModal('decision-modal');
+        const noun = { applications: 'Application', returns: 'Return', messages: 'Message' }[d.kind];
+        const verb = { approve: 'approved', reject: 'rejected', resolve: 'resolved', reopen: 'reopened' }[d.act];
+        const n = res.notified || {};
+        const sent = [n.email ? 'emailed' : '', n.sms === 'sent' ? 'texted' : ''].filter(Boolean);
+        toast(`${noun} ${verb}${sent.length ? ` · customer ${sent.join(' and ')}` : ''}`);
+        if (typeof n.sms === 'string' && /^(failed|skipped)/.test(n.sms)) {
+          setTimeout(() => toast(`Text not sent: ${n.sms.replace(/^(failed|skipped): /, '')}`, true), 600);
+        }
+        d.after?.();
+      } catch (err) {
+        if (d.act === 'reject') byId('decision-reason').error = err.message;
+        else { hideModal('decision-modal'); toast(`Couldn’t update: ${err.message}`, true); }
+      } finally { btn.loading = false; }
     });
   }
 
   // ── Application detail ─────────────────────────────────────────────────────
   async function viewApplication(id) {
-    const a = await api(`/api/submissions/${id}`);
+    const [a, smsStatus] = await Promise.all([api(`/api/submissions/${id}`), api('/api/sms/settings').catch(() => null)]);
+    const smsReady = Boolean(smsStatus?.apiKeySet);
     const status = a.status || 'pending';
     const photos = photoUrls(a.id_photo_path);
     const shopOrderId = String(a.assigned_order_gid || '').split('/').pop();
@@ -518,17 +582,6 @@
       ? `<s-button slot="primary-action" variant="primary" id="approve-btn">Approve</s-button>
          <s-button slot="secondary-actions" id="reject-btn">Reject</s-button>`
       : `<s-button slot="secondary-actions" commandFor="revert-modal" command="--show">Revert to pending</s-button>`;
-
-    const discount = a.discount_code
-      ? `<s-stack gap="small">
-          <s-stack direction="inline" gap="small" alignItems="center">
-            <s-text type="strong"><span class="mono">${esc(a.discount_code)}</span></s-text>
-            <s-button icon="clipboard" variant="tertiary" id="copy-code" accessibilityLabel="Copy discount code"></s-button>
-          </s-stack>
-          <s-stack direction="inline" gap="small" alignItems="center">
-            <s-button id="check-usage">Check usage</s-button><span id="usage-badge"></span>
-          </s-stack></s-stack>`
-      : `<s-text color="subdued">${status === 'approved' ? 'No code was created (automatic codes are off in Settings).' : 'A discount code is created when you approve.'}</s-text>`;
 
     const order = a.assigned_order_gid
       ? `<s-stack gap="small">
@@ -572,16 +625,13 @@
         </s-grid>
       </s-section>
       </s-stack>
-      <s-section slot="aside" heading="Discount">${discount}</s-section>
       <s-section slot="aside" heading="Order">${order}</s-section>
     </s-page>
 
-    ${rejectModal('application')}
+    ${decisionModal()}
 
     <s-modal id="revert-modal" heading="Revert to pending?">
-      ${a.discount_code
-        ? `<s-banner tone="warning">The discount code ${esc(a.discount_code)} will be deleted. The customer can’t use it anymore. This can’t be undone.</s-banner>`
-        : '<s-paragraph>The application goes back to the pending list.</s-paragraph>'}
+      <s-paragraph>The application goes back to the pending list.</s-paragraph>
       <s-button slot="primary-action" variant="primary" tone="critical" id="revert-confirm">Revert to pending</s-button>
       <s-button slot="secondary-actions" commandFor="revert-modal" command="--hide">Cancel</s-button>
     </s-modal>
@@ -603,7 +653,7 @@
         <s-search-field id="assign-search" label="Search orders" placeholder="Order number, customer name or email"></s-search-field>
         <s-text color="subdued">Leave blank to see ${esc(a.full_name)}’s own orders.</s-text>
         <div id="assign-orders"><s-spinner accessibilityLabel="Loading orders"></s-spinner></div>
-        <s-choice-list id="assign-tag" label="Discount type">
+        <s-choice-list id="assign-tag" label="Type">
           <s-choice value="PWD" ${a.assigned_tag === 'PWD' ? 'selected' : ''}>PWD</s-choice>
           <s-choice value="SC" ${a.assigned_tag !== 'PWD' ? 'selected' : ''}>SC</s-choice>
         </s-choice-list>
@@ -621,11 +671,11 @@
       finally { loading(false); }
     };
 
-    on('approve-btn', 'click', () => act(
-      () => api(`/api/submissions/${id}/status`, { method: 'PATCH', body: { status: 'approved' } }),
-      'Application approved', 'Couldn’t approve'));
-    on('reject-btn', 'click', () => openReject(id, a.full_name));
-    wireReject('application', (rid, reason) => api(`/api/submissions/${rid}/status`, { method: 'PATCH', body: { status: 'rejected', reason } }), reload);
+    const decide = (actName) => openDecision({ kind: 'applications', act: actName, id, name: a.full_name,
+      email: a.email_address, phone: a.contact_number, smsReady, after: reload });
+    on('approve-btn', 'click', () => decide('approve'));
+    on('reject-btn', 'click', () => decide('reject'));
+    wireDecision();
     on('revert-confirm', 'click', () => { hideModal('revert-modal'); act(
       () => api(`/api/submissions/${id}/status`, { method: 'PATCH', body: { status: 'pending' } }),
       'Application set back to pending', 'Couldn’t revert'); });
@@ -633,20 +683,6 @@
       () => api(`/api/submissions/${id}/assign-order`, { method: 'DELETE' }), 'Order unassigned', 'Couldn’t unassign'); });
     on('mark-refund', 'click', () => act(() => api(`/api/submissions/${id}/refund`, { method: 'POST' }), 'Marked as refunded', 'Couldn’t mark refunded'));
     on('undo-refund', 'click', () => act(() => api(`/api/submissions/${id}/refund`, { method: 'DELETE' }), 'Refund mark removed', 'Couldn’t update'));
-
-    on('copy-code', 'click', async () => {
-      try { await navigator.clipboard.writeText(a.discount_code); toast('Code copied'); }
-      catch { toast('Couldn’t copy. Select the code and copy it.', true); }
-    });
-    on('check-usage', 'click', async (e) => {
-      const btn = e.currentTarget; btn.loading = true;
-      try {
-        const u = await api(`/api/submissions/${id}/discount-usage`);
-        byId('usage-badge').innerHTML = u.used
-          ? `<s-badge tone="success">Used${u.usage_count > 1 ? ` ×${u.usage_count}` : ''}</s-badge>` : '<s-badge>Unused</s-badge>';
-      } catch (err) { toast(`Couldn’t check usage: ${err.message}`, true); }
-      finally { btn.loading = false; }
-    });
 
     // Photo lightbox
     let photoIdx = 0;
@@ -696,6 +732,7 @@
   // ── Message + return detail ────────────────────────────────────────────────
   async function viewMessage(id) {
     const m = await api(`/api/contact-submissions/${id}`);
+    const reloadMsg = () => viewMessage(id);
     const status = m.status || 'pending';
     $app.innerHTML = `<s-page heading="${esc(m.full_name)}">
       <s-link slot="breadcrumb-actions" href="${BASE}/requests/messages">Messages</s-link>
@@ -715,19 +752,16 @@
           <s-link href="tel:${esc(m.contact_number)}">${esc(fmtPhone(m.contact_number))}</s-link>
         </s-stack>
       </s-section>
-    </s-page>`;
-    on('toggle-msg', 'click', async (e) => {
-      const next = status === 'pending' ? 'resolved' : 'pending';
-      e.currentTarget.loading = true;
-      try {
-        await api(`/api/contact-submissions/${id}/status`, { method: 'PATCH', body: { status: next } });
-        toast(next === 'resolved' ? 'Message resolved' : 'Message reopened'); viewMessage(id);
-      } catch (err) { toast(`Couldn’t update: ${err.message}`, true); e.currentTarget.loading = false; }
-    });
+    </s-page>
+    ${decisionModal()}`;
+    on('toggle-msg', 'click', () => openDecision({ kind: 'messages', act: status === 'pending' ? 'resolve' : 'reopen',
+      id, name: m.full_name, after: reloadMsg }));
+    wireDecision();
   }
 
   async function viewReturn(id) {
-    const r = await api(`/api/return-requests/${id}`);
+    const [r, smsStatus] = await Promise.all([api(`/api/return-requests/${id}`), api('/api/sms/settings').catch(() => null)]);
+    const smsReady = Boolean(smsStatus?.apiKeySet);
     const status = r.status || 'pending';
     const photos = photoUrls(r.image_paths);
     $app.innerHTML = `<s-page heading="Return for ${esc(r.order_number)}">
@@ -763,7 +797,7 @@
         </s-stack>
       </s-section>
     </s-page>
-    ${rejectModal('return')}
+    ${decisionModal()}
     <s-modal id="revert-ret-modal" heading="Set this return back to pending?">
       <s-paragraph>It goes back to the pending list so it can be reviewed again.</s-paragraph>
       <s-button slot="primary-action" variant="primary" id="revert-ret-confirm">Revert</s-button>
@@ -776,10 +810,12 @@
       catch (err) { toast(`Couldn’t update: ${err.message}`, true); }
       finally { loading(false); }
     };
-    on('approve-ret', 'click', () => setStatus('approved', 'Return approved'));
-    on('reject-ret', 'click', () => openReject(id, r.full_name));
+    const decide = (actName) => openDecision({ kind: 'returns', act: actName, id, name: r.full_name,
+      email: r.email_address, phone: r.contact_number, order: r.order_number, smsReady, after: () => viewReturn(id) });
+    on('approve-ret', 'click', () => decide('approve'));
+    on('reject-ret', 'click', () => decide('reject'));
+    wireDecision();
     on('revert-ret-confirm', 'click', () => { hideModal('revert-ret-modal'); setStatus('pending', 'Return set back to pending'); });
-    wireReject('return', (rid, reason) => api(`/api/return-requests/${rid}/status`, { method: 'PATCH', body: { status: 'rejected', reason } }), () => viewReturn(id));
   }
 
   // ── Blasts ─────────────────────────────────────────────────────────────────
@@ -1236,7 +1272,6 @@
 
   // ── Settings ───────────────────────────────────────────────────────────────
   const SETTING_GROUPS = {
-    Discounts: 'The SC/PWD discount given when you approve an application.',
     Notifications: 'Who gets an email when a new application, message or return comes in.',
     'Email blasts': 'Slows sending so emails don’t get flagged as spam.',
     SMS: 'Shipping texts and SMS blasts, sent through Semaphore.',

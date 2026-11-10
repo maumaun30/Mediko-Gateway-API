@@ -51,17 +51,15 @@ Every admin route uses the `requireAdmin` middleware, which pins the algorithm, 
 
 The unsubscribe HMAC (`unsubscribeToken`) still uses `DASHBOARD_JWT_SECRET` with its old fallback, so links already sent keep working; changing that secret invalidates old unsubscribe links.
 
+### Decision notifications
+
+`PATCH /api/submissions/:id/status` and `PATCH /api/return-requests/:id/status` take an optional `notify: { email, sms }`. Email defaults to **on**, which keeps old clients' behavior; it controls the existing approval and rejection emails. SMS defaults to **off**: `sendDecisionSms()` texts a short ASCII message (`decisionSms()`, kept to 1 credit; the reason stays in the email). The response carries `notified: { email, sms }`, where `sms` is `"off"`, `"sent"`, `"skipped: …"` or `"failed: …"`. An SMS failure never fails the status change. In the portal, every approve, reject, resolve and reopen goes through one confirmation dialog (`openDecision`) with these two checkboxes. Messages have no notification options.
+
 ### Shopify integration
 
-When an application is moved to `approved` via `PATCH /api/submissions/:id/status`:
+**Discount codes are discontinued.** Approving an application only sets its status and (optionally) emails/texts the customer; nothing is created or deleted in Shopify, and the old discount helpers, the `discount-usage` route, the `discount_*` settings and the `read_discounts`/`write_discounts` scopes were removed. The `discount_*` columns on `applications` are kept (legacy data) but no longer written or shown.
 
-1. `findOrCreateShopifyCustomer` — search by email, create if missing (tagged `senior-pwd-discount`).
-2. Create a `price_rule` with `customer_selection: "prerequisite"` tied to that customer ID, `usage_limit: 1`, `once_per_customer: true`, percentage discount from the `discount_percentage` setting.
-3. Create a `discount_code` under that price rule, format `MEDIKO-{appId}-{8 hex chars}`.
-4. Persist `discount_code`, `discount_price_rule_id`, `discount_code_id` on the row.
-5. Email the code to the applicant.
-
-Reverting an approved row to `pending`/`rejected` deletes the `price_rule` (cascades the code) and nulls those columns. `GET /api/submissions/:id/discount-usage` proxies to Shopify to report `usage_count`. If Shopify env vars are absent, approval returns 503 — there is no offline fallback path.
+Shopify is used for: order assignment (`/api/submissions/:id/orders`, `assign-order`, which tags the order and customer PWD/SC), refund marks (`/refund`), the shipping-SMS webhook and order phone lookup, and `GET /api/shopify/scopes`. If Shopify env vars are absent, those routes return 503.
 
 ### Email blasts
 
@@ -95,7 +93,7 @@ Two Multer instances (`upload` for ID photos, `returnsUpload` for return attachm
 
 **Secrets and infrastructure stay in `.env` only** — DB, Brevo, `MAIL_FROM`, admin/JWT secrets, `ALLOWED_ORIGINS`, Shopify credentials, `SEMAPHORE_API_KEY`, webhook secret, URLs, `TESTING_MODE`. Never store these in the DB or return their values to the portal (it may only report set / not set).
 
-**Operating config lives in `app_settings`**, edited in the portal's Settings tab via `GET/PUT /api/settings`. The `SETTINGS` registry in `index.js` defines each key (type, bounds, group, label, legacy env var). Read values with `getSetting(key)` at use time — never cache them in module-level constants — so a save takes effect without a restart. Precedence: saved value → env var of the same meaning (keeps old `.env` files working) → default. To add a setting, add it to `SETTINGS`; the portal form is generated from it. Current keys: `discount_percentage`, `discount_autogen_enabled`, `admin_email`, `admin_cc`, `email_blast_delay_ms`, `sms_shipping_enabled`, `sms_sender_name`, `sms_blast_delay_ms`.
+**Operating config lives in `app_settings`**, edited in the portal's Settings tab via `GET/PUT /api/settings`. The `SETTINGS` registry in `index.js` defines each key (type, bounds, group, label, legacy env var). Read values with `getSetting(key)` at use time — never cache them in module-level constants — so a save takes effect without a restart. Precedence: saved value → env var of the same meaning (keeps old `.env` files working) → default. To add a setting, add it to `SETTINGS`; the portal form is generated from it. Current keys: `admin_email`, `admin_cc`, `email_blast_delay_ms`, `sms_shipping_enabled`, `sms_sender_name`, `sms_blast_delay_ms`.
 
 ### Health check
 

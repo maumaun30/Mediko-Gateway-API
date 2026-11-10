@@ -7,7 +7,7 @@ name = "MedikoPH Gateway"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_customers,write_customers,read_discounts,write_discounts,read_orders,write_orders,read_fulfillments"
+scopes = "read_customers,write_customers,read_orders,write_orders,read_fulfillments"
 optional_scopes = [ ]
 use_legacy_install_flow = false
 
