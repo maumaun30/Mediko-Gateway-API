@@ -147,9 +147,9 @@
     on(tableId, 'previouspage', () => go(withQuery(path, { ...state, page: meta.current_page - 1 })));
   }
   function statusTabs(path, state, current, tabs) {
-    return `<s-button-group>${tabs.map(([key, label, count]) =>
+    return `<s-stack direction="inline" gap="small-200">${tabs.map(([key, label, count]) =>
       `<s-button href="${BASE}${withQuery(path, { ...state, status: key, page: '' })}" variant="${current === key ? 'primary' : 'secondary'}">${esc(label)}${count != null ? ` ${num(count)}` : ''}</s-button>`
-    ).join('')}</s-button-group>`;
+    ).join('')}</s-stack>`;
   }
 
   // ── Router ─────────────────────────────────────────────────────────────────
@@ -232,7 +232,7 @@
         action: `<s-button href="${BASE}/settings">Open Settings</s-button>` },
       { done: s.checkoutPhoneDone, title: 'Phone number required at checkout',
         note: 'In Shopify Settings › Checkout, set “Shipping address phone number” to Required.',
-        action: `<s-button-group><s-button href="shopify://admin/settings/checkout" target="_top">Open checkout settings</s-button><s-button id="mark-phone-done">Mark as done</s-button></s-button-group>` },
+        action: `<s-stack direction="inline" gap="small-200"><s-button href="shopify://admin/settings/checkout" target="_top">Open checkout settings</s-button><s-button id="mark-phone-done">Mark as done</s-button></s-stack>` },
       { done: s.testSmsSent, title: 'Send a test SMS', note: 'Uses 1 credit.',
         action: `<s-button id="open-test-sms">Send test SMS</s-button>` },
     ];
@@ -664,10 +664,10 @@
 
     $app.innerHTML = `<s-page heading="Requests"><s-stack gap="base">
       ${pageTitle('Requests')}
-      <s-button-group>
+      <s-stack direction="inline" gap="small-200">
         <s-button href="${BASE}/requests/messages" variant="${isMsg ? 'primary' : 'secondary'}">Messages ${num(counts.contact.pending || 0)}</s-button>
         <s-button href="${BASE}/requests/returns" variant="${isMsg ? 'secondary' : 'primary'}">Returns ${num(counts.returns.pending || 0)}</s-button>
-      </s-button-group>
+      </s-stack>
       ${statusTabs(path, state, state.status, tabs)}
       ${body}
     </s-stack></s-page>`;
@@ -816,10 +816,10 @@
       ${isSms ? '<s-button slot="secondary-actions" commandFor="optout-modal" command="--show">Add opt-outs</s-button>' : ''}
       <s-stack gap="base">
       ${pageTitle('Blasts')}
-      <s-button-group>
+      <s-stack direction="inline" gap="small-200">
         <s-button href="${BASE}/blasts/email" variant="${isSms ? 'secondary' : 'primary'}">Email</s-button>
         <s-button href="${BASE}/blasts/sms" variant="${isSms ? 'primary' : 'secondary'}">SMS</s-button>
-      </s-button-group>
+      </s-stack>
       ${history}
       ${optoutSection}
     </s-stack></s-page>
