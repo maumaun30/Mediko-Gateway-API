@@ -2092,12 +2092,29 @@
       if (!c || !text) return;
       if (c.status === 'closed') { toast('Reopen this chat to reply', true); return; }
       if (text.length > CHAT_MAX_TEXT) { toast(`Keep replies under ${CHAT_MAX_TEXT} characters`, true); return; }
-      if (!conn.send({ type: 'agent_message', sessionId: c.id, text })) { toast('Chat service is offline. Your reply was not sent.', true); return; }
+      if (replies.isPending(c.id, text)) return; // same reply already on its way
+      const clientId = replies.add(c.id, text);
+      if (!conn.send({ type: 'agent_message', sessionId: c.id, text, clientId })) {
+        replies.fail(clientId);
+        toast('Chat service is offline. Your reply was not sent.', true);
+        return;
+      }
       conn.send({ type: 'typing', sessionId: c.id, value: false });
       st.lastTypingSent = 0;
-      $input.value = '';
-      st.drafts.delete(c.id);
+      // The text stays in the composer until the server echoes agent_sent with this clientId.
     }
+    // A reply was confirmed: clear it from the composer / stored draft unless the agent has edited it since.
+    function clearSentDraft({ sessionId, text }) {
+      if (st.selected === sessionId) {
+        if (String($input.value || '').trim() === text) $input.value = '';
+      } else if (String(st.drafts.get(sessionId) || '').trim() === text) {
+        st.drafts.delete(sessionId);
+      }
+    }
+    const replies = window.createReplyTracker({
+      timeoutMs: 10000,
+      onTimeout: () => toast('Reply not confirmed by the chat service. It is still in the box: check the thread before resending.', true),
+    });
     $input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendReply(); }
     });
@@ -2138,9 +2155,12 @@
           if (sid && sid === st.selected) { hideTyping(); appendMessage(ev.message); renderHead(); }
           renderRows();
           break;
-        case 'agent_sent':
+        case 'agent_sent': {
+          const mine = typeof ev.clientId === 'string' ? replies.confirm(ev.clientId) : null;
+          if (mine) clearSentDraft(mine);
           if (sid && sid === st.selected) appendMessage(ev.message);
           break;
+        }
         case 'session_updated': {
           const prev = sid ? st.convs.get(sid) : null;
           upsert(ev.conversation);
@@ -2159,9 +2179,11 @@
             st.typingTimer = setTimeout(hideTyping, CHAT_TYPING_SHOW_MS);
           }
           break;
-        case 'error':
-          toast(`Chat: ${String(ev.message || 'error').slice(0, 200)}`, true);
+        case 'error': {
+          const failed = typeof ev.clientId === 'string' ? replies.fail(ev.clientId) : null;
+          toast(`Chat: ${String(ev.message || 'error').slice(0, 200)}${failed ? '. Your reply is still in the box.' : ''}`, true);
           break;
+        }
         default: break;
       }
     }
@@ -2195,6 +2217,7 @@
       onEvent,
       onStatus: (s) => {
         byId('chat-offline').hidden = s !== 'offline';
+        if (s === 'offline' && replies.failAll().length) toast('Connection lost before your reply was confirmed. It is still in the box: check the thread before resending.', true);
         if (s === 'online' && st.wasOffline) resync();
         st.wasOffline = s === 'offline';
       },
