@@ -1,7 +1,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const crypto = require('crypto')
-const { verifyChatEventSignature, chatDeepLink, buildStaffAlertMail, validateChatEvent } = require('../lib/chat')
+const { verifyChatEventSignature, chatDeepLink, buildStaffAlertMail, validateChatEvent, subjectName, maskId, redactPath } = require('../lib/chat')
 
 const S = 'x'.repeat(32)
 const sig = (ts, body, s = S) => crypto.createHmac('sha256', s).update(`${ts}.${body}`).digest('hex')
@@ -76,4 +76,36 @@ test('offline_reply with null email is valid; other checks still apply', () => {
   assert.equal(validateChatEvent({ ...off, link: 'http://x.y' }), false)
   assert.equal(validateChatEvent({ ...off, email: 'bad, x@y.zz' }), false)
   assert.equal(validateChatEvent({ ...off, name: 5 }), false)
+})
+
+test('staff alert subject: name cut to 60 chars, control and bidi characters stripped', () => {
+  const long = 'A'.repeat(100)
+  const m = buildStaffAlertMail({ type: 'new_conversation', name: long, text: 'x' }, 'https://g/chats/1')
+  const shown = m.subject.replace(/^New chat from /, '')
+  assert.equal(Array.from(shown).length, 60)
+  assert.ok(shown.endsWith('…'))
+  assert.ok(m.text.includes(long), 'body keeps the full name')
+  const evil = buildStaffAlertMail({ type: 'unanswered', name: 'Ana\u202Egnp.exe\r\nBcc: x@y\u200B', text: '' }, 'l')
+  assert.equal(evil.subject, 'Unanswered chat from Ana gnp.exe Bcc: x@y')
+  assert.equal(subjectName('  \u202E\u2066 '), 'Unknown visitor')
+  assert.equal(subjectName('Maria Santos'), 'Maria Santos')
+})
+
+test('maskId and redactPath keep chat session ids out of logs', () => {
+  const id = '3f2a9c1e-7b4d-4e8a-9c0f-1a2b3c4d5e6f'
+  assert.equal(maskId(id), '3f2a9c1e…')
+  assert.equal(maskId(undefined), undefined)
+  assert.equal(redactPath(`/admin-dashboard/chats/${id}`), '/admin-dashboard/chats/:id')
+  assert.equal(redactPath('/api/inbox/counts'), '/api/inbox/counts')
+})
+
+test('index.js never logs a raw chat sessionId or link', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8')
+  const logs = src.match(/log\(\s*"[a-z]+",\s*"[a-z_]+",[^\n]*/g) || []
+  for (const line of logs) {
+    assert.ok(!/sessionId:\s*event\.sessionId/.test(line), line)
+    assert.ok(!/\blink\b/.test(line), line)
+    assert.ok(!/path:\s*req\.path/.test(line), line)
+  }
+  assert.ok(logs.some((l) => l.includes('chat_event_received') && l.includes('maskId(event.sessionId)')))
 })

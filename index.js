@@ -10,7 +10,7 @@ const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 const jwt = require("jsonwebtoken");
 const {
-  verifyChatEventSignature, chatDeepLink, buildStaffAlertMail, validateChatEvent,
+  verifyChatEventSignature, chatDeepLink, buildStaffAlertMail, validateChatEvent, maskId, redactPath,
 } = require("./lib/chat");
 
 const app = express();
@@ -116,7 +116,7 @@ app.get("/health", async (_req, res) => {
 app.use((req, _res, next) => {
   log("info", "request_received", {
     method: req.method,
-    path: req.path,
+    path: redactPath(req.path), // chat session ids (/chats/<id>) are credentials
     ip: req.ip,
   });
   next();
@@ -430,7 +430,7 @@ function requireAdmin(req, res, next) {
     req.admin = { sub: String(shopify.sub), shop: new URL(shopify.dest).hostname, sid: shopify.sid };
     return next();
   } catch (err) {
-    log("warn", "admin_token_rejected", { reason: err.message, path: req.path, ip: req.ip });
+    log("warn", "admin_token_rejected", { reason: err.message, path: redactPath(req.path), ip: req.ip });
     return res.status(401).json({ error: "Invalid or expired token" });
   }
 }
@@ -3411,7 +3411,7 @@ async function processChatEvent(event) {
   const link = chatDeepLink(event.sessionId);
   if (event.type === "offline_reply") {
     if (!event.email) {
-      log("info", "chat_reply_no_email", { sessionId: event.sessionId });
+      log("info", "chat_reply_no_email", { sessionId: maskId(event.sessionId) });
       return;
     }
     await sendTemplateEmail(
@@ -3464,7 +3464,7 @@ function handleChatEvent(req, res) {
     return res.status(400).json({ error: "Invalid event" });
   }
   res.status(202).json({ ok: true });
-  log("info", "chat_event_received", { type: event.type, sessionId: event.sessionId });
+  log("info", "chat_event_received", { type: event.type, sessionId: maskId(event.sessionId) });
   processChatEvent(event).catch((err) =>
     log("error", "chat_event_failed", { type: event.type, message: err.message }),
   );
@@ -4339,7 +4339,7 @@ app.delete("/api/sms-optouts/:phone", requireAdmin, async (req, res) => {
 
 // ── Global error handler ──────────────────────────────────────────────────────
 app.use((err, req, res, _next) => {
-  log("error", "unhandled_error", { message: err.message, path: req.path });
+  log("error", "unhandled_error", { message: err.message, path: redactPath(req.path) });
   res.status(500).json({ error: "An unexpected error occurred." });
 });
 
