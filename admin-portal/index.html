@@ -23,11 +23,33 @@
     /* In-page title (the admin title bar also shows it). */
     .page-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .page-title h1 { margin: 0; font: 650 1.25rem/1.75rem -apple-system, BlinkMacSystemFont, "San Francisco", "Segoe UI", Roboto, "Helvetica Neue", sans-serif; color: #303030; overflow-wrap: anywhere; }
+    /* Chats: three panes (list | thread | details); one pane at a time below 768px. */
+    .chat-grid { display: grid; grid-template-columns: 32% 1fr 24%; height: 600px; }
+    .chat-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+    .chat-pane + .chat-pane { border-left: 1px solid #e3e3e3; }
+    .chat-bar { border-bottom: 1px solid #e3e3e3; }
+    .chat-bar-top { border-top: 1px solid #e3e3e3; }
+    .chat-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+    .chat-row { border-bottom: 1px solid #f1f1f1; }
+    .chat-msgs { display: flex; flex-direction: column; gap: 8px; padding: 12px; }
+    .chat-msg { max-width: 72%; }
+    .chat-msg.from-user { align-self: flex-start; }
+    .chat-msg.from-agent { align-self: flex-end; }
+    .chat-mobile { display: none; }
+    @media (max-width: 767px) {
+      .chat-grid { grid-template-columns: 1fr; height: 560px; }
+      .chat-pane + .chat-pane { border-left: 0; }
+      .chat-grid[data-view="list"] > :not(.chat-list),
+      .chat-grid[data-view="thread"] > :not(.chat-thread),
+      .chat-grid[data-view="details"] > :not(.chat-details) { display: none; }
+      .chat-mobile { display: inline-block; }
+    }
   </style>
 </head>
 <body>
   <s-app-nav>
     <s-link href="/admin-dashboard/" rel="home">Home</s-link>
+    <s-link href="/admin-dashboard/chats">Chats</s-link>
     <s-link href="/admin-dashboard/applications">Senior/PWD</s-link>
     <s-link href="/admin-dashboard/requests/returns">Returns</s-link>
     <s-link href="/admin-dashboard/requests/messages">Messages</s-link>
@@ -39,6 +61,7 @@
 
   <div id="app"></div>
 
+  <script src="/admin-dashboard/chat-connection.js"></script>
   <script>
   'use strict';
 
@@ -216,6 +239,8 @@
   // ── Router ─────────────────────────────────────────────────────────────────
   const ROUTES = [
     [/^\/?$/, viewHome],
+    [/^\/chats$/, () => viewChats()],
+    [/^\/chats\/([0-9a-f-]{36})$/, viewChats],
     [/^\/applications$/, () => viewInbox('applications')],
     [/^\/applications\/(\d+)$/, viewApplication],
     [/^\/requests$/, () => go('/requests/returns')],
@@ -1760,6 +1785,408 @@
         toast(`Couldn’t save chat settings: ${err.message}`, true);
       } finally { btn.disabled = false; loading(false); }
     });
+  }
+
+  // ── Chats (live agent inbox) ───────────────────────────────────────────────
+  // REST (chatClient.api) loads lists and history; the agent WebSocket
+  // (chat-connection.js) brings live events. Everything a customer typed
+  // (names, emails, messages) is untrusted: always esc().
+  const CHAT_ID_RE = /^[0-9a-f-]{36}$/;
+  const CHAT_FILTERS = [['open', 'Open'], ['unanswered', 'Unanswered'], ['closed', 'Closed']];
+  const CHAT_TYPING_SHOW_MS = 5000;
+  const CHAT_TYPING_THROTTLE_MS = 3000;
+  const CHAT_MAX_TEXT = 2000;
+
+  // Chat service timestamps are 'YYYY-MM-DD HH:MM:SS(.sss)' UTC without a zone.
+  function chatTime(v) {
+    if (!v) return null;
+    let s = String(v);
+    if (/^\d{4}-\d{2}-\d{2} /.test(s)) s = s.replace(' ', 'T');
+    if (!/(Z|[+-]\d{2}:?\d{2})$/.test(s)) s += 'Z';
+    const t = Date.parse(s);
+    return Number.isNaN(t) ? null : t;
+  }
+  function chatAgo(v) {
+    const t = chatTime(v);
+    if (t === null) return '';
+    const s = Math.max(0, (Date.now() - t) / 1000);
+    if (s < 60) return 'now';
+    if (s < 3600) return `${Math.floor(s / 60)}m`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h`;
+    const d = new Date(t);
+    if (s < 6 * 86400) return d.toLocaleDateString('en-US', { weekday: 'short' });
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  }
+  const isAgentRole = (role) => role === 'agent' || role === 'assistant';
+
+  async function viewChats(sessionId) {
+    const st = {
+      convs: new Map(),        // id → Conversation (every one we have seen)
+      filter: 'open',
+      q: '',
+      searchIds: null,         // ids from the last search (null = no search)
+      selected: null,
+      messages: [],            // thread of the selected conversation
+      drafts: new Map(),       // per-conversation composer text
+      typingTimer: null,
+      lastTypingSent: 0,
+      wasOffline: false,
+      loadSeq: 0,
+      listSeq: 0,
+    };
+    const initial = sessionId && CHAT_ID_RE.test(sessionId) ? sessionId : null;
+
+    const upsert = (c) => { if (c && typeof c.id === 'string' && CHAT_ID_RE.test(c.id)) st.convs.set(c.id, c); };
+    const listUrl = (status, q = '') => `/api/agent/conversations?status=${status}&limit=200${q ? `&q=${encodeURIComponent(q.slice(0, 100))}` : ''}`;
+
+    // First load: open + unanswered, so the counts and the badge are right.
+    let open, unans;
+    try {
+      [open, unans] = await Promise.all([chatClient.api(listUrl('open')), chatClient.api(listUrl('unanswered'))]);
+    } catch (err) {
+      const msg = err.status === 503
+        ? '<s-section><s-banner tone="warning" heading="Chat service not configured">Set CHAT_API_URL and CHAT_AGENT_SECRET in the server .env.</s-banner></s-section>'
+        : errorSection(`Chat service is offline. ${err.message}`);
+      $app.innerHTML = `<s-page heading="Chats"><s-stack gap="base">${pageTitle('Chats')}${msg}</s-stack></s-page>`;
+      on('retry-load', 'click', () => location.reload());
+      return;
+    }
+    (open.conversations || []).forEach(upsert);
+    (unans.conversations || []).forEach(upsert);
+
+    $app.innerHTML = `<s-page heading="Chats">
+      <s-stack gap="base">
+      ${pageTitle('Chats', '<span id="chat-unans"></span>')}
+      <div id="chat-offline" hidden><s-banner tone="critical">Chat service is offline. Reconnecting…</s-banner></div>
+      <s-section padding="none">
+        <div class="chat-grid" id="chat-grid" data-view="${initial ? 'thread' : 'list'}">
+          <div class="chat-pane chat-list">
+            <div class="chat-bar"><s-box padding="small-200"><s-stack gap="small-200">
+              <s-button-group gap="none" id="chat-filters"></s-button-group>
+              <s-search-field id="chat-search" label="Search chats" labelAccessibilityVisibility="exclusive" placeholder="Search name, email, phone" maxLength="100"></s-search-field>
+            </s-stack></s-box></div>
+            <div class="chat-scroll" id="chat-rows"></div>
+          </div>
+          <div class="chat-pane chat-thread">
+            <div class="chat-bar"><s-box padding="small-200" id="chat-head"></s-box></div>
+            <div class="chat-scroll"><div class="chat-msgs" id="chat-msgs"></div></div>
+            <s-box paddingInline="small-200"><s-text color="subdued" id="chat-typing"></s-text></s-box>
+            <div class="chat-bar-top"><s-box padding="small-200">
+              <s-grid gridTemplateColumns="1fr auto" gap="small-200" alignItems="end">
+                <s-text-area id="chat-input" label="Reply" labelAccessibilityVisibility="exclusive" rows="2" maxLength="${CHAT_MAX_TEXT}" placeholder="Type a reply… (Enter to send, Shift+Enter for a new line)" disabled></s-text-area>
+                <s-button id="chat-send" variant="primary" disabled>Send</s-button>
+              </s-grid>
+            </s-box></div>
+          </div>
+          <div class="chat-pane chat-details"><div class="chat-scroll"><s-box padding="base" id="chat-details"></s-box></div></div>
+        </div>
+      </s-section>
+      </s-stack>
+    </s-page>`;
+
+    const $grid = byId('chat-grid');
+    const $rows = byId('chat-rows');
+    const $msgs = byId('chat-msgs');
+    const $input = byId('chat-input');
+    const $send = byId('chat-send');
+    const $typing = byId('chat-typing');
+    const showPane = (v) => { $grid.dataset.view = v; };
+
+    // ── List ──
+    const inFilter = (c) => (st.filter === 'unanswered' ? c.unanswered : c.status === st.filter);
+    function renderCounts() {
+      const all = [...st.convs.values()];
+      const nUnans = all.filter((c) => c.unanswered).length;
+      const nOpen = all.filter((c) => c.status === 'open').length;
+      byId('chat-unans').innerHTML = nUnans ? `<s-badge tone="attention">${esc(num(nUnans))} unanswered</s-badge>` : '';
+      const counts = { open: nOpen, unanswered: nUnans };
+      byId('chat-filters').innerHTML = CHAT_FILTERS.map(([key, label]) =>
+        `<s-button data-chat-filter="${key}" variant="${st.filter === key ? 'primary' : 'secondary'}">${esc(label)}${counts[key] ? ` ${esc(num(counts[key]))}` : ''}</s-button>`).join('');
+    }
+    function renderRows() {
+      renderCounts();
+      let list = [...st.convs.values()].filter(inFilter);
+      if (st.searchIds) list = list.filter((c) => st.searchIds.has(c.id));
+      list.sort((a, b) => (chatTime(b.lastActive) || 0) - (chatTime(a.lastActive) || 0));
+      if (!list.length) {
+        $rows.innerHTML = `<s-box padding="base"><s-text color="subdued">${st.q ? 'No chats match your search.' : `No ${st.filter} chats.`}</s-text></s-box>`;
+        return;
+      }
+      $rows.innerHTML = list.map((c) => `<div class="chat-row">
+        <s-clickable data-chat-id="${esc(c.id)}" padding="small-200" background="${c.id === st.selected ? 'subdued' : 'transparent'}" accessibilityLabel="Open chat with ${esc(c.displayName)}">
+          <s-stack direction="inline" gap="small-200" justifyContent="space-between" alignItems="start">
+            <s-stack gap="none">
+              <s-stack direction="inline" gap="small-200" alignItems="center">
+                <s-text type="strong">${esc(c.displayName)}</s-text>
+                ${c.unanswered ? '<s-badge tone="attention">New</s-badge>' : ''}
+              </s-stack>
+              <s-text color="subdued"><span class="cell-one">${esc(c.lastMessage || '')}</span></s-text>
+            </s-stack>
+            <s-text color="subdued"><span class="nowrap" title="${esc(fmtDate(chatTime(c.lastActive)))}">${esc(chatAgo(c.lastActive))}</span></s-text>
+          </s-stack>
+        </s-clickable></div>`).join('');
+    }
+    async function loadList() {
+      const seq = ++st.listSeq;
+      const q = st.q;
+      try {
+        const r = await chatClient.api(listUrl(st.filter, q));
+        if (seq !== st.listSeq) return;
+        const got = r.conversations || [];
+        got.forEach(upsert);
+        st.searchIds = q ? new Set(got.map((c) => c.id)) : null;
+        renderRows();
+      } catch (err) {
+        if (seq === st.listSeq) toast(`Couldn’t load chats: ${err.message}`, true);
+      }
+    }
+
+    // ── Thread ──
+    const current = () => (st.selected ? st.convs.get(st.selected) : null);
+    function renderHead() {
+      const c = current();
+      const $head = byId('chat-head');
+      if (!c) {
+        $head.innerHTML = '<s-text color="subdued">Select a chat</s-text>';
+        $input.disabled = true; $send.disabled = true;
+        return;
+      }
+      const closed = c.status === 'closed';
+      $head.innerHTML = `<s-stack direction="inline" gap="small-200" justifyContent="space-between" alignItems="center">
+        <s-stack direction="inline" gap="small-200" alignItems="center">
+          <span class="chat-mobile"><s-button id="chat-back" variant="tertiary" icon="arrow-left" accessibilityLabel="Back to chats"></s-button></span>
+          <s-text type="strong">${esc(c.displayName)}</s-text>
+          ${c.online ? '<s-badge tone="success">Online</s-badge>' : ''}
+          ${closed ? '<s-badge>Closed</s-badge>' : ''}
+        </s-stack>
+        <s-stack direction="inline" gap="small-200">
+          <span class="chat-mobile"><s-button id="chat-show-details" variant="tertiary">Details</s-button></span>
+          <s-button id="chat-toggle">${closed ? 'Reopen' : 'Close chat'}</s-button>
+        </s-stack>
+      </s-stack>`;
+      $input.disabled = false;
+      $send.disabled = closed;
+      on('chat-back', 'click', () => showPane('list'));
+      on('chat-show-details', 'click', () => showPane('details'));
+      on('chat-toggle', 'click', () => {
+        if (!conn.send({ type: closed ? 'reopen' : 'close', sessionId: c.id })) toast('Chat service is offline', true);
+      });
+    }
+    const msgHtml = (m) => {
+      const agent = isAgentRole(m.role);
+      return `<div class="chat-msg ${agent ? 'from-agent' : 'from-user'}">
+        <s-box padding="small-200" borderRadius="large" background="${agent ? 'strong' : 'base'}" border="base">
+          <s-stack gap="none">
+            <s-text><span class="prewrap">${esc(m.content)}</span></s-text>
+            <s-text color="subdued"><span class="nowrap">${esc(agent ? 'Mediko Support · ' : '')}${esc(fmtShort(chatTime(m.created_at)))}</span></s-text>
+          </s-stack>
+        </s-box></div>`;
+    };
+    const shownRole = (m) => m && (m.role === 'user' || isAgentRole(m.role));
+    function scrollThread(force) {
+      const box = $msgs.parentElement;
+      const near = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
+      if (force || near) box.scrollTop = box.scrollHeight;
+    }
+    function renderMessages() {
+      const list = st.messages.filter(shownRole);
+      $msgs.innerHTML = list.length ? list.map(msgHtml).join('') : '<s-text color="subdued">No messages yet.</s-text>';
+      scrollThread(true);
+    }
+    function appendMessage(m) {
+      if (!shownRole(m)) return;
+      if (m.id && st.messages.some((x) => x.id === m.id)) return;
+      const wasEmpty = !st.messages.some(shownRole);
+      st.messages.push(m);
+      if (wasEmpty) { renderMessages(); return; }
+      $msgs.insertAdjacentHTML('beforeend', msgHtml(m));
+      scrollThread(isAgentRole(m.role));
+    }
+    function hideTyping() { clearTimeout(st.typingTimer); st.typingTimer = null; $typing.textContent = ''; }
+
+    // ── Details ──
+    async function renderDetails() {
+      const c = current();
+      const $d = byId('chat-details');
+      if (!c) { $d.innerHTML = ''; return; }
+      const id = c.id;
+      const email = c.email || '';
+      $d.innerHTML = `<s-stack gap="base">
+        <span class="chat-mobile"><s-button id="chat-details-back" variant="tertiary" icon="arrow-left">Back to chat</s-button></span>
+        <s-stack gap="small-200">
+          <s-heading>Customer</s-heading>
+          <s-text>${esc(c.displayName)}</s-text>
+          ${email ? `<s-link href="mailto:${esc(email)}">${esc(email)}</s-link>` : '<s-text color="subdued">No email</s-text>'}
+          ${c.phone ? `<s-link href="tel:${esc(c.phone)}">${esc(fmtPhone(c.phone))}</s-link>` : '<s-text color="subdued">No phone</s-text>'}
+        </s-stack>
+        <s-divider></s-divider>
+        <s-stack gap="small-200"><s-heading>Shopify</s-heading><div id="chat-shopify"><s-text color="subdued">${email ? 'Looking up…' : 'No email to look up.'}</s-text></div></s-stack>
+        <s-divider></s-divider>
+        <s-stack gap="small-200"><s-heading>Offline replies</s-heading><s-text color="subdued">Replies are emailed if the customer is offline.</s-text></s-stack>
+      </s-stack>`;
+      on('chat-details-back', 'click', () => showPane('thread'));
+      if (!email) return;
+      let html;
+      try {
+        const r = await api(`/api/chat/customer?email=${encodeURIComponent(email)}`);
+        const cu = r.customer;
+        if (!cu) html = '<s-text color="subdued">No Shopify customer with this email.</s-text>';
+        else {
+          const link = /^https:\/\//.test(String(cu.adminUrl || '')) ? `<s-link href="${esc(cu.adminUrl)}" target="_blank">View customer</s-link>` : '';
+          html = `<s-text>${esc(plural(Number(cu.ordersCount) || 0, 'order'))}${cu.lastOrderName ? ` · last ${esc(cu.lastOrderName)}` : ''}</s-text>${link}`;
+        }
+      } catch (err) {
+        html = `<s-text color="subdued">${esc(err.status === 503 ? 'Shopify not configured.' : `Lookup failed: ${err.message}`)}</s-text>`;
+      }
+      const host = byId('chat-shopify');
+      if (host && st.selected === id) host.innerHTML = `<s-stack gap="small-200">${html}</s-stack>`;
+    }
+
+    // ── Selecting a conversation ──
+    async function select(id, { fromDeepLink = false } = {}) {
+      if (!CHAT_ID_RE.test(id)) return;
+      if (st.selected) st.drafts.set(st.selected, $input.value || '');
+      st.selected = id;
+      $input.value = st.drafts.get(id) || '';
+      st.lastTypingSent = 0;
+      hideTyping();
+      history.replaceState(null, '', `${BASE}/chats/${id}`);
+      showPane('thread');
+      const seq = ++st.loadSeq;
+      st.messages = [];
+      $msgs.innerHTML = '<s-spinner accessibilityLabel="Loading chat"></s-spinner>';
+      renderHead(); renderRows(); renderDetails();
+      try {
+        const r = await chatClient.api(`/api/agent/conversations/${id}`);
+        if (seq !== st.loadSeq) return;
+        upsert(r.conversation);
+        // Live events that arrived during the fetch are kept (appendMessage dedupes by id).
+        const live = st.messages;
+        st.messages = Array.isArray(r.messages) ? r.messages : [];
+        live.forEach((m) => { if (!st.messages.some((x) => x.id === m.id)) st.messages.push(m); });
+        if (fromDeepLink && r.conversation?.status === 'closed') { st.filter = 'closed'; loadList(); }
+        renderMessages(); renderHead(); renderRows(); renderDetails();
+      } catch (err) {
+        if (seq !== st.loadSeq) return;
+        $msgs.innerHTML = `<s-banner tone="critical">${esc(err.status === 404 ? 'This chat doesn’t exist.' : `Couldn’t load this chat: ${err.message}`)}</s-banner>`;
+        if (err.status === 404) { st.selected = null; history.replaceState(null, '', `${BASE}/chats`); renderHead(); renderRows(); renderDetails(); }
+      }
+    }
+
+    // ── Composer ──
+    function sendReply() {
+      const c = current();
+      const text = String($input.value || '').trim();
+      if (!c || !text) return;
+      if (c.status === 'closed') { toast('Reopen this chat to reply', true); return; }
+      if (text.length > CHAT_MAX_TEXT) { toast(`Keep replies under ${CHAT_MAX_TEXT} characters`, true); return; }
+      if (!conn.send({ type: 'agent_message', sessionId: c.id, text })) { toast('Chat service is offline. Your reply was not sent.', true); return; }
+      conn.send({ type: 'typing', sessionId: c.id, value: false });
+      st.lastTypingSent = 0;
+      $input.value = '';
+      st.drafts.delete(c.id);
+    }
+    $input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendReply(); }
+    });
+    $input.addEventListener('input', () => {
+      const c = current();
+      if (!c || c.status === 'closed' || !String($input.value || '').trim()) return;
+      const now = Date.now();
+      if (now - st.lastTypingSent < CHAT_TYPING_THROTTLE_MS) return;
+      if (conn.send({ type: 'typing', sessionId: c.id, value: true })) st.lastTypingSent = now;
+    });
+    $send.addEventListener('click', sendReply);
+
+    // ── List controls ──
+    $rows.addEventListener('click', (e) => {
+      const el = e.target.closest('[data-chat-id]');
+      if (el) select(el.dataset.chatId);
+    });
+    byId('chat-filters').addEventListener('click', (e) => {
+      const el = e.target.closest('[data-chat-filter]');
+      if (!el || el.dataset.chatFilter === st.filter) return;
+      st.filter = el.dataset.chatFilter;
+      renderRows();
+      loadList();
+    });
+    let searchTimer;
+    on('chat-search', 'input', (e) => {
+      clearTimeout(searchTimer);
+      const v = String(e.currentTarget.value || '').trim().slice(0, 100);
+      searchTimer = setTimeout(() => { st.q = v; if (!v) st.searchIds = null; renderRows(); loadList(); }, 300);
+    });
+
+    // ── Live events ──
+    function onEvent(ev) {
+      const sid = typeof ev.sessionId === 'string' && CHAT_ID_RE.test(ev.sessionId) ? ev.sessionId : null;
+      switch (ev.type) {
+        case 'customer_message':
+          upsert(ev.conversation);
+          if (sid && sid === st.selected) { hideTyping(); appendMessage(ev.message); renderHead(); }
+          renderRows();
+          break;
+        case 'agent_sent':
+          if (sid && sid === st.selected) appendMessage(ev.message);
+          break;
+        case 'session_updated': {
+          const prev = sid ? st.convs.get(sid) : null;
+          upsert(ev.conversation);
+          if (sid && sid === st.selected) {
+            renderHead();
+            if (prev && (prev.email !== ev.conversation?.email || prev.phone !== ev.conversation?.phone || prev.displayName !== ev.conversation?.displayName)) renderDetails();
+          }
+          renderRows();
+          break;
+        }
+        case 'customer_typing':
+          if (sid && sid === st.selected) {
+            const c = current();
+            $typing.textContent = `${c ? c.displayName : 'Customer'} is typing…`;
+            clearTimeout(st.typingTimer);
+            st.typingTimer = setTimeout(hideTyping, CHAT_TYPING_SHOW_MS);
+          }
+          break;
+        case 'error':
+          toast(`Chat: ${String(ev.message || 'error').slice(0, 200)}`, true);
+          break;
+        default: break;
+      }
+    }
+    // Missed events while offline: reload lists and the open thread on reconnect.
+    async function resync() {
+      try {
+        const [o, u] = await Promise.all([chatClient.api(listUrl('open')), chatClient.api(listUrl('unanswered'))]);
+        const keep = current();
+        st.convs.clear();
+        if (keep) upsert(keep);
+        (o.conversations || []).forEach(upsert);
+        (u.conversations || []).forEach(upsert);
+        renderRows();
+        if (st.filter === 'closed' || st.q) loadList();
+        if (st.selected) {
+          const r = await chatClient.api(`/api/agent/conversations/${st.selected}`);
+          upsert(r.conversation);
+          st.messages = Array.isArray(r.messages) ? r.messages : [];
+          renderMessages(); renderHead(); renderRows();
+        }
+      } catch (err) {
+        toast(`Couldn’t refresh chats: ${err.message}`, true);
+      }
+    }
+    const conn = window.createChatConnection({
+      getToken: () => chatClient.token(true), // fresh agent JWT for every (re)connect
+      onEvent,
+      onStatus: (s) => {
+        byId('chat-offline').hidden = s !== 'offline';
+        if (s === 'online' && st.wasOffline) resync();
+        st.wasOffline = s === 'offline';
+      },
+    });
+    setInterval(renderRows, 60000); // keep relative times fresh
+
+    renderRows(); renderHead(); renderDetails();
+    if (initial) select(initial, { fromDeepLink: true });
   }
 
   route();

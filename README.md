@@ -55,8 +55,8 @@ node index.js            # listens on PORT, default 3001
 ```
 
 The app boots without a `.env`, but every database, mail and Shopify call will
-fail. There is no build step, no linter and no test suite — `npm test` exits 1 by
-design.
+fail. There is no build step and no linter. `npm test` still exits 1 by design;
+the live-chat unit tests run with `node --test test/*.test.js`.
 
 For local form testing set `TESTING_MODE=true`, which disables the rate limiter,
 the time trap and the per-email cooldown. **Never set this in production.**
@@ -106,6 +106,14 @@ fallback until something is saved.
 |---|---|
 | `SEMAPHORE_API_KEY` | Semaphore API key, for shipping texts and SMS blasts |
 
+### Live chat
+
+| Variable | Notes |
+|---|---|
+| `CHAT_API_URL` | Base URL of the chat service. Returned to the portal with agent tokens |
+| `CHAT_AGENT_SECRET` | Shared with the chat service, 32+ characters, same value in both `.env` files. Signs agent tokens and verifies chat events |
+| `SHOPIFY_ADMIN_APP_URL` | Admin URL up to and including the app handle, for "Open in Gateway" links in chat alert emails |
+
 ### Other
 
 | Variable | Notes |
@@ -154,6 +162,7 @@ session token. Grouped by area; read `index.js` for bodies.
 | Shipping SMS | `/api/sms/settings`, `/api/sms/account`, `/api/sms/notifications[/:id/retry]`, `/api/sms/test` |
 | SMS blasts | `/api/sms-blasts` (same shape as email blasts), `/api/sms-optouts` |
 | Diagnostics | `GET /api/shopify/scopes` |
+| Live chat | `POST /api/chat/agent-token` (5-minute agent JWT + chat service URL), `GET /api/chat/customer?email=` (Shopify customer id, admin link, order count, last order) |
 
 The three list routes take `limit`, `page`, `search`, `status`, `date_from`,
 `date_to`. Status changes take `{status, reason, notify}` — `notify` picks
@@ -164,6 +173,7 @@ email and/or SMS and can carry an edited message for that one send.
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/webhooks/shopify/fulfillments-create` | HMAC-verified; texts the customer once per fulfillment |
+| `POST` | `/internal/chat-events` | From the chat service, HMAC-signed (`X-Mediko-Timestamp`, `X-Mediko-Signature`, 5-minute window). Staff alerts for new and unanswered chats; offline reply emails to customers |
 | `GET/POST` | `/api/unsubscribe` | Email blast unsubscribe link |
 | `GET` | `/health` | `SELECT 1` with a 3s timeout, for UptimeRobot |
 
@@ -171,7 +181,7 @@ email and/or SMS and can carry an edited message for that one send.
 
 | Path | Serves |
 |---|---|
-| `/admin-dashboard/*` | The staff SPA (`admin-portal/index.html`); any extension-less path falls back to it |
+| `/admin-dashboard/*` | The staff SPA (`admin-portal/index.html`); any extension-less path falls back to it. Real files such as `chat-connection.js` are served as themselves |
 | `/view-uploads/*` | Uploaded files, read-only |
 
 ## Anti-abuse stack
@@ -283,6 +293,14 @@ App Bridge adds a Shopify session token to every same-origin `fetch`.
 `requireAdmin` verifies it (HS256 with `SHOPIFY_CLIENT_SECRET`, `exp`/`nbf`,
 `aud` = client ID, `dest` pinned to `SHOPIFY_SHOP_DOMAIN`). Nav, title bar,
 save bar, toasts and modals all come from App Bridge.
+
+The **Chats** page (`/admin-dashboard/chats[/<sessionId>]`) is the live agent
+inbox: conversation list, thread and customer details. It gets an agent token
+from `POST /api/chat/agent-token`, calls the chat service directly for lists
+and history, and keeps a WebSocket open for live messages, typing and status
+changes (`admin-portal/chat-connection.js` reconnects with backoff and shows an
+offline banner meanwhile). Chat alert emails link straight to
+`/chats/<sessionId>`.
 
 The CSP middleware sets `frame-ancestors` from `ALLOWED_ORIGINS` — keep new
 origins in sync there.
