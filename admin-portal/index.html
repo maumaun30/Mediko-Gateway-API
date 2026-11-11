@@ -81,6 +81,40 @@
     return json ?? {};
   }
 
+  // ── Chat service client ────────────────────────────────────────────────────
+  // The gateway mints a short-lived agent token; the chat service is called
+  // directly at the apiUrl it returns. The Bearer token is only ever sent there.
+  const chatClient = (() => {
+    let cached = null; // { token, apiUrl, exp }
+    async function token(force = false) {
+      if (!force && cached && Date.now() < cached.exp - 30000) return { token: cached.token, apiUrl: cached.apiUrl };
+      const r = await api('/api/chat/agent-token', { method: 'POST' });
+      const exp = Date.parse(r.expiresAt);
+      cached = { token: r.token, apiUrl: String(r.apiUrl || '').replace(/\/+$/, ''), exp: Number.isFinite(exp) ? exp : 0 };
+      return { token: cached.token, apiUrl: cached.apiUrl };
+    }
+    async function call(path, { method, body }, force) {
+      if (typeof path !== 'string' || path[0] !== '/') throw new Error('Invalid chat path');
+      const { token: t, apiUrl } = await token(force);
+      const headers = { Authorization: `Bearer ${t}` };
+      if (body) headers['Content-Type'] = 'application/json';
+      return fetch(apiUrl + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    }
+    async function chatApi(path, { method = 'GET', body } = {}) {
+      let res = await call(path, { method, body }, false);
+      if (res.status === 401) res = await call(path, { method, body }, true);
+      const text = await res.text();
+      let json = null;
+      try { json = text ? JSON.parse(text) : {}; } catch { /* non-JSON */ }
+      if (!res.ok) {
+        const err = new Error(json?.error || json?.message || `Chat service error ${res.status}`);
+        err.status = res.status; throw err;
+      }
+      return json ?? {};
+    }
+    return { token, api: chatApi };
+  })();
+
   const fmtDate = (ts) => ts
     ? new Date(ts).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })
     : '—';
@@ -1581,7 +1615,10 @@
     Notifications: 'Who gets an email when a new application, message or return comes in.',
     'Email blasts': 'Slows sending so emails don’t get flagged as spam.',
     SMS: 'Shipping texts and SMS blasts, sent through Semaphore.',
+    Chat: 'Who is emailed about live chats.',
   };
+  const CHAT_DAYS = [['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday'], ['sun', 'Sunday']];
+  const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
   async function viewSettings() {
     const { settings, secrets } = await api('/api/settings');
@@ -1625,7 +1662,10 @@
           </s-grid>
         </s-stack>
       </s-page>
-    </form>`;
+    </form>
+    <s-box padding="base"><div id="chat-card"></div></s-box>`;
+
+    loadChatCard();
 
     const form = byId('settings-form');
     const readValue = (s) => {
@@ -1655,6 +1695,71 @@
       } finally { loading(false); }
     });
     form.addEventListener('reset', () => setTimeout(viewSettings, 0));
+  }
+
+  // Chat card: loads on its own so a chat-service failure never breaks Settings.
+  async function loadChatCard() {
+    const host = byId('chat-card');
+    if (!host) return;
+    const wrap = (inner) => `<s-grid gap="base" gridTemplateColumns="repeat(auto-fit, minmax(16rem, 1fr))">
+      <s-box padding="small-200"><s-stack gap="small-200"><s-heading>Chat</s-heading>
+        <s-paragraph color="subdued">Office hours, the away message and the unanswered-chat alert for live chat.</s-paragraph></s-stack></s-box>
+      <s-section>${inner}</s-section></s-grid>`;
+    host.innerHTML = wrap('<s-text color="subdued">Loading chat settings…</s-text>');
+    let data;
+    try {
+      data = await chatClient.api('/api/agent/settings');
+    } catch (err) {
+      host.innerHTML = wrap(err.status === 503
+        ? '<s-banner tone="warning">Chat service not configured (CHAT_API_URL / CHAT_AGENT_SECRET).</s-banner>'
+        : `<s-banner tone="critical" heading="Couldn’t load chat settings">${esc(err.message)}</s-banner>`);
+      if (err.status !== 503) toast(`Chat settings: ${err.message}`, true);
+      return;
+    }
+    const bh = data.businessHours || {};
+    const hours = bh.hours || {};
+    const unanswered = data.unansweredMinutes ?? 10;
+    const dayRow = ([k, label]) => {
+      const h = hours[k] || { open: false, start: '08:00', end: '17:00' };
+      return `<s-stack direction="inline" gap="base" alignItems="end">
+        <s-switch id="chat-${k}-open" label="${label}" ${h.open ? 'checked' : ''}></s-switch>
+        <s-text-field id="chat-${k}-start" label="Start (HH:MM)" labelAccessibilityVisibility="exclusive" placeholder="HH:MM" maxLength="5" value="${esc(h.start)}"></s-text-field>
+        <s-text-field id="chat-${k}-end" label="End (HH:MM)" labelAccessibilityVisibility="exclusive" placeholder="HH:MM" maxLength="5" value="${esc(h.end)}"></s-text-field>
+      </s-stack>`;
+    };
+    host.innerHTML = wrap(`<s-stack gap="base">
+      <s-switch id="chat-enabled" label="Use office hours" details="When off, chat is treated as always open." ${bh.enabled === false ? '' : 'checked'}></s-switch>
+      ${bh.timezone ? `<s-text color="subdued">Timezone: <span class="mono">${esc(bh.timezone)}</span></s-text>` : ''}
+      ${CHAT_DAYS.map(dayRow).join('')}
+      <s-text-area id="chat-away" label="Away message" rows="3" maxLength="1000" value="${esc(bh.awayMessage || '')}"></s-text-area>
+      <s-number-field id="chat-unanswered" label="Alert when unanswered for (minutes)" min="1" max="240" value="${esc(unanswered)}"></s-number-field>
+      <s-stack direction="inline"><s-button id="chat-save" variant="primary">Save chat settings</s-button></s-stack>
+    </s-stack>`);
+
+    on('chat-save', 'click', async () => {
+      const btn = byId('chat-save');
+      let bad = false;
+      const body = { enabled: Boolean(byId('chat-enabled').checked), awayMessage: String(byId('chat-away').value || ''), hours: {} };
+      CHAT_DAYS.forEach(([k]) => {
+        const start = String(byId(`chat-${k}-start`).value || '').trim();
+        const end = String(byId(`chat-${k}-end`).value || '').trim();
+        byId(`chat-${k}-start`).error = HHMM_RE.test(start) ? '' : 'Use HH:MM (24-hour)';
+        byId(`chat-${k}-end`).error = HHMM_RE.test(end) ? '' : 'Use HH:MM (24-hour)';
+        if (!HHMM_RE.test(start) || !HHMM_RE.test(end)) bad = true;
+        body.hours[k] = { open: Boolean(byId(`chat-${k}-open`).checked), start, end };
+      });
+      const mins = Number(byId('chat-unanswered').value);
+      const minsOk = Number.isInteger(mins) && mins >= 1 && mins <= 240;
+      byId('chat-unanswered').error = minsOk ? '' : 'Enter a whole number from 1 to 240';
+      if (bad || !minsOk) { toast('Couldn’t save: check the highlighted fields', true); return; }
+      btn.disabled = true; loading(true);
+      try {
+        await chatClient.api('/api/agent/settings', { method: 'PUT', body: { businessHours: body, unansweredMinutes: mins } });
+        toast('Chat settings saved');
+      } catch (err) {
+        toast(`Couldn’t save chat settings: ${err.message}`, true);
+      } finally { btn.disabled = false; loading(false); }
+    });
   }
 
   route();
