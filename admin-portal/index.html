@@ -2002,6 +2002,20 @@
       $msgs.insertAdjacentHTML('beforeend', msgHtml(m));
       scrollThread(isAgentRole(m.role));
     }
+    // Fetched history + in-memory messages (live events that arrived during a
+    // fetch), deduped by id, oldest first; ties keep server order.
+    function mergeMessages(fetched, live) {
+      const out = Array.isArray(fetched) ? fetched.filter(Boolean) : [];
+      const ids = new Set(out.map((m) => m.id).filter(Boolean));
+      (live || []).forEach((m) => {
+        if (!m) return;
+        if (m.id && ids.has(m.id)) return;
+        if (m.id) ids.add(m.id);
+        out.push(m);
+      });
+      const at = (m) => chatTime(m.created_at) ?? Number.MAX_SAFE_INTEGER;
+      return out.map((m, i) => [m, i]).sort((a, b) => (at(a[0]) - at(b[0])) || (a[1] - b[1])).map(([m]) => m);
+    }
     function hideTyping() { clearTimeout(st.typingTimer); st.typingTimer = null; $typing.textContent = ''; }
 
     // ── Details ──
@@ -2061,9 +2075,7 @@
         if (seq !== st.loadSeq) return;
         upsert(r.conversation);
         // Live events that arrived during the fetch are kept (appendMessage dedupes by id).
-        const live = st.messages;
-        st.messages = Array.isArray(r.messages) ? r.messages : [];
-        live.forEach((m) => { if (!st.messages.some((x) => x.id === m.id)) st.messages.push(m); });
+        st.messages = mergeMessages(r.messages, st.messages);
         if (fromDeepLink && r.conversation?.status === 'closed') { st.filter = 'closed'; loadList(); }
         renderMessages(); renderHead(); renderRows(); renderDetails();
       } catch (err) {
@@ -2165,9 +2177,13 @@
         renderRows();
         if (st.filter === 'closed' || st.q) loadList();
         if (st.selected) {
-          const r = await chatClient.api(`/api/agent/conversations/${st.selected}`);
+          // Same stale-response guard as select(): drop it if the agent switched chats.
+          const id = st.selected;
+          const seq = ++st.loadSeq;
+          const r = await chatClient.api(`/api/agent/conversations/${id}`);
+          if (seq !== st.loadSeq || st.selected !== id) return;
           upsert(r.conversation);
-          st.messages = Array.isArray(r.messages) ? r.messages : [];
+          st.messages = mergeMessages(r.messages, st.messages);
           renderMessages(); renderHead(); renderRows();
         }
       } catch (err) {
