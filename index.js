@@ -3410,10 +3410,14 @@ function chatAlertRecipients() {
 async function processChatEvent(event) {
   const link = chatDeepLink(event.sessionId);
   if (event.type === "offline_reply") {
+    if (!event.email) {
+      log("info", "chat_reply_no_email", { sessionId: event.sessionId });
+      return;
+    }
     await sendTemplateEmail(
       "chat_reply_customer",
       event.email,
-      recordVars("chat", { full_name: event.name }, { messages: event.messages.join("\n\n"), link: event.link }),
+      recordVars("chat", { full_name: event.name || "" }, { messages: event.messages.join("\n\n"), link: event.link }),
       undefined,
       { event: "offline_reply" },
     );

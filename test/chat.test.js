@@ -59,3 +59,21 @@ test('validateChatEvent rejects bad events', () => {
     { ...off, messages: [1] }, { ...off, link: 'http://x.y' }, { ...off, link: 'https://' + 'a'.repeat(2000) },
   ]) assert.equal(validateChatEvent(bad), false, JSON.stringify(bad)?.slice(0, 80))
 })
+
+test('unanswered with null name/phone/email is valid; mail shows Unknown visitor', () => {
+  const e = { type: 'unanswered', sessionId: 's', name: null, email: null, phone: null, text: 'hi' }
+  assert.equal(validateChatEvent(e), true)
+  assert.equal(validateChatEvent({ type: 'new_conversation', sessionId: 's', text: 'hi' }), true)
+  const m = buildStaffAlertMail(e, 'https://l')
+  assert.equal(m.subject, 'Unanswered chat from Unknown visitor')
+  assert.match(m.text, /Name: Unknown visitor/)
+  assert.match(m.text, /Email: —/)
+  assert.match(m.html, /Phone:<\/strong> —/)
+})
+test('offline_reply with null email is valid; other checks still apply', () => {
+  const off = { type: 'offline_reply', sessionId: 's', name: null, email: null, messages: ['a'], link: 'https://x.y' }
+  assert.equal(validateChatEvent(off), true)
+  assert.equal(validateChatEvent({ ...off, link: 'http://x.y' }), false)
+  assert.equal(validateChatEvent({ ...off, email: 'bad, x@y.zz' }), false)
+  assert.equal(validateChatEvent({ ...off, name: 5 }), false)
+})
