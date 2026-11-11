@@ -9,6 +9,9 @@ const crypto = require("crypto");
 const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 const jwt = require("jsonwebtoken");
+const {
+  verifyChatEventSignature, chatDeepLink, buildStaffAlertMail, validateChatEvent,
+} = require("./lib/chat");
 
 const app = express();
 app.set("trust proxy", 1);
@@ -57,8 +60,11 @@ const corsMiddleware = cors({
 
 // The unsubscribe page posts its form back to this host, which isn't in
 // ALLOWED_ORIGINS. That route is token-guarded and credential-free, so skip CORS.
+// /internal/chat-events is server-to-server (HMAC-signed), so it skips CORS too.
 app.use((req, res, next) =>
-  req.path === "/api/unsubscribe" ? next() : corsMiddleware(req, res, next),
+  req.path === "/api/unsubscribe" || req.path === "/internal/chat-events"
+    ? next()
+    : corsMiddleware(req, res, next),
 );
 
 // Shopify webhooks need the raw body for HMAC verification, so this route is
@@ -67,6 +73,14 @@ app.post(
   "/webhooks/shopify/fulfillments-create",
   express.raw({ type: "application/json", limit: "1mb" }),
   handleFulfillmentCreateWebhook,
+);
+
+// Chat service events are HMAC-signed over the raw body, so mount before the
+// global JSON parser. Handler lives in the Chat section below.
+app.post(
+  "/internal/chat-events",
+  express.raw({ type: "application/json", limit: "256kb" }),
+  handleChatEvent,
 );
 
 app.use(express.json({ limit: "1mb" }));
@@ -456,6 +470,11 @@ const SETTINGS = {
     env: "SEMAPHORE_SENDER_NAME", default: "",
     help: "Must be approved in Semaphore first. Blank uses Semaphore's default sender.",
   },
+  chat_alert_recipients: {
+    group: "Chat", label: "Chat alert recipients", type: "email_list",
+    env: "CHAT_ALERT_RECIPIENTS", default: "",
+    help: "Get an email when a chat starts or goes unanswered.",
+  },
   sms_blast_delay_ms: {
     group: "SMS", label: "Pause between blast texts (ms)", type: "number", min: 0, max: 10000,
     env: "SMS_BLAST_DELAY_MS", default: 600,
@@ -470,6 +489,8 @@ const SECRET_ENV_STATUS = [
   ["SHOPIFY_WEBHOOK_SECRET", "Shopify webhook secret (only for webhooks made in Shopify admin)"],
   ["BREVO_PASS", "Brevo SMTP key (email)"],
   ["DASHBOARD_JWT_SECRET", "Dashboard JWT secret"],
+  ["CHAT_AGENT_SECRET", "Chat service shared secret"],
+  ["CHAT_API_URL", "Chat service URL"],
 ];
 
 let settingsCache = {}; // key → raw string from app_settings
@@ -1738,6 +1759,20 @@ Thank you,
     vars: ["first_name", "order", "reference_id"],
     body: "Mediko: Hi {{first_name}}, your return request for order {{order}} wasn't approved. Please check your email for details.",
   },
+  chat_reply_customer: {
+    group: "Chat", name: "Chat reply (customer offline)", channel: "email",
+    vars: ["name", "first_name", "messages", "link"],
+    subject: "Sumagot na po ang Mediko Support",
+    body: `Hello {{first_name}},
+
+Sumagot na po ang Mediko Support sa inyong mensahe:
+
+{{messages}}
+
+Para magpatuloy sa chat, buksan po ito: {{link}}
+
+${SIGNOFF}`,
+  },
   contact_received: {
     group: "Messages", name: "Message received", channel: "email",
     vars: ["name", "first_name", "message", "reference_id"],
@@ -1860,6 +1895,7 @@ function recordVars(kind, row, extra = {}) {
   if (kind === "application") Object.assign(base, { id_number: row.id_number });
   if (kind === "return") Object.assign(base, { order: row.order_number, items: row.items_to_return });
   if (kind === "contact") Object.assign(base, { message: row.message });
+  if (kind === "chat") base.reference_id = "";
   return { ...base, ...extra };
 }
 
@@ -3299,6 +3335,136 @@ app.post("/api/blasts/:id/cancel", requireAdmin, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ── Live chat (agent token, customer lookup, signed events) ───────────────────
+const CHAT_SECRET_MIN = 32;
+
+function chatSecretOk() {
+  const s = process.env.CHAT_AGENT_SECRET;
+  return typeof s === "string" && s.length >= CHAT_SECRET_MIN;
+}
+
+app.post("/api/chat/agent-token", requireAdmin, (req, res) => {
+  if (!chatSecretOk() || !process.env.CHAT_API_URL) {
+    return res.status(503).json({ error: "Chat service not configured" });
+  }
+  try {
+    const token = jwt.sign({}, process.env.CHAT_AGENT_SECRET, {
+      algorithm: "HS256",
+      issuer: "mediko-gateway",
+      audience: "mediko-chat",
+      subject: String(req.admin.sub),
+      expiresIn: 300,
+    });
+    res.json({
+      token,
+      expiresAt: new Date(Date.now() + 300 * 1000).toISOString(),
+      apiUrl: process.env.CHAT_API_URL,
+    });
+  } catch (err) {
+    log("error", "chat_agent_token_failed", { message: err.message });
+    res.status(500).json({ error: "Could not issue token" });
+  }
+});
+
+app.get("/api/chat/customer", requireAdmin, async (req, res) => {
+  const email = typeof req.query.email === "string" ? req.query.email.trim() : "";
+  if (!email || email.length > 254 || !EMAIL_LIST_RE.test(email)) {
+    return res.status(400).json({ error: "Valid email required" });
+  }
+  if (!process.env.SHOPIFY_SHOP_DOMAIN) {
+    return res.status(503).json({ error: "Shopify not configured" });
+  }
+  try {
+    const data = await shopifyGraphQL(
+      `query($q: String!) {
+         customers(first: 1, query: $q) {
+           nodes { id numberOfOrders lastOrder { name } }
+         }
+       }`,
+      { q: `email:"${email.replace(/["\\]/g, "")}"` },
+    );
+    const c = data && data.customers && data.customers.nodes && data.customers.nodes[0];
+    if (!c) return res.json({ customer: null });
+    const numericId = String(c.id).split("/").pop();
+    res.json({
+      customer: {
+        id: c.id,
+        adminUrl: `https://${process.env.SHOPIFY_SHOP_DOMAIN}/admin/customers/${numericId}`,
+        ordersCount: Number(c.numberOfOrders) || 0,
+        lastOrderName: (c.lastOrder && c.lastOrder.name) || null,
+      },
+    });
+  } catch (err) {
+    log("error", "chat_customer_lookup_failed", { message: err.message });
+    res.status(500).json({ error: "Customer lookup failed" });
+  }
+});
+
+function chatAlertRecipients() {
+  // Same parsing as admin_cc's email_list.
+  return String(getSetting("chat_alert_recipients") || "")
+    .split(",").map((e) => e.trim()).filter(Boolean);
+}
+
+async function processChatEvent(event) {
+  const link = chatDeepLink(event.sessionId);
+  if (event.type === "offline_reply") {
+    await sendTemplateEmail(
+      "chat_reply_customer",
+      event.email,
+      recordVars("chat", { full_name: event.name }, { messages: event.messages.join("\n\n"), link: event.link }),
+      undefined,
+      { event: "offline_reply" },
+    );
+    return;
+  }
+  const to = chatAlertRecipients();
+  if (!to.length) {
+    log("warn", "chat_alert_no_recipients", { type: event.type });
+    return;
+  }
+  const mail = buildStaffAlertMail(event, link);
+  await transporter.sendMail({
+    from: `"Mediko Gateway" <${process.env.MAIL_FROM}>`,
+    to,
+    subject: mail.subject,
+    text: mail.text,
+    html: mail.html,
+  });
+  log("info", "chat_alert_sent", { type: event.type, recipients: to.length });
+}
+
+function handleChatEvent(req, res) {
+  if (!chatSecretOk()) return res.status(503).json({ error: "Chat not configured" });
+  const raw = Buffer.isBuffer(req.body) ? req.body : null;
+  if (
+    !raw ||
+    !verifyChatEventSignature(
+      raw,
+      req.get("x-mediko-timestamp"),
+      req.get("x-mediko-signature"),
+      process.env.CHAT_AGENT_SECRET,
+    )
+  ) {
+    log("warn", "chat_event_rejected", { ip: req.ip });
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  let event;
+  try {
+    event = JSON.parse(raw.toString("utf8"));
+  } catch {
+    event = null;
+  }
+  if (!validateChatEvent(event)) {
+    return res.status(400).json({ error: "Invalid event" });
+  }
+  res.status(202).json({ ok: true });
+  log("info", "chat_event_received", { type: event.type, sessionId: event.sessionId });
+  processChatEvent(event).catch((err) =>
+    log("error", "chat_event_failed", { type: event.type, message: err.message }),
+  );
+}
 
 // ── /api/unsubscribe ──────────────────────────────────────────────────────────
 // Public, token-guarded. GET only renders a confirm button, because mail
