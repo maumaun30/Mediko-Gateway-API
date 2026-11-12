@@ -1673,10 +1673,13 @@
         <s-section><s-stack gap="base">${settings.filter((s) => s.group === g).map(field).join('')}</s-stack></s-section>
       </s-grid>`).join('');
 
-    $app.innerHTML = `<form id="settings-form" data-save-bar data-discard-confirmation>
-      <s-page heading="Settings">
+    // The chat card sits inside the page (same width as the other groups) but
+    // outside the form, so its own fields never trigger the Settings save bar.
+    $app.innerHTML = `<s-page heading="Settings">
+      <s-stack gap="large">
+        ${pageTitle('Settings')}
+        <form id="settings-form" data-save-bar data-discard-confirmation>
         <s-stack gap="large">
-          ${pageTitle('Settings')}
           ${groups}
           <s-grid gap="base" gridTemplateColumns="repeat(auto-fit, minmax(16rem, 1fr))">
             <s-box padding="small-200"><s-stack gap="small-200"><s-heading>Server secrets</s-heading>
@@ -1686,9 +1689,10 @@
               <s-badge tone="${x.set ? 'success' : 'neutral'}">${x.set ? 'Set' : 'Not set'}</s-badge></s-stack>`).join('')}</s-stack></s-section>
           </s-grid>
         </s-stack>
-      </s-page>
-    </form>
-    <s-box padding="base"><div id="chat-card"></div></s-box>`;
+        </form>
+        <div id="chat-card"></div>
+      </s-stack>
+    </s-page>`;
 
     loadChatCard();
 
@@ -1727,8 +1731,8 @@
     const host = byId('chat-card');
     if (!host) return;
     const wrap = (inner) => `<s-grid gap="base" gridTemplateColumns="repeat(auto-fit, minmax(16rem, 1fr))">
-      <s-box padding="small-200"><s-stack gap="small-200"><s-heading>Chat</s-heading>
-        <s-paragraph color="subdued">Office hours, the away message and the unanswered-chat alert for live chat.</s-paragraph></s-stack></s-box>
+      <s-box padding="small-200"><s-stack gap="small-200"><s-heading>Chat office hours</s-heading>
+        <s-paragraph color="subdued">Office hours, the away message and the unanswered-chat alert for live chat. Saved with its own button.</s-paragraph></s-stack></s-box>
       <s-section>${inner}</s-section></s-grid>`;
     host.innerHTML = wrap('<s-text color="subdued">Loading chat settings…</s-text>');
     let data;
