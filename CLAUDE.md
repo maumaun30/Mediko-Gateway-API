@@ -87,7 +87,7 @@ Admin bulk SMS under `/api/sms-blasts*` (all `requireAdmin`), a copy of the emai
 - **Auth:** calls use plain `fetch('/api/...')`; App Bridge adds the session token (see **Admin auth**). Opened outside the admin iframe, the page shows only an "Open this app from your Shopify admin" notice.
 - **Status badges:** one mapping (`TONES`) for every status.
 - **Inbox tables** (Senior/PWD, Returns, Messages) share `viewInbox(kind)` with the `INBOX` config. They have row checkboxes and a bulk bar that replaces the filters while rows are selected. Bulk actions call the normal per-record `PATCH …/status` one at a time (so each customer gets their own templated email/SMS) and skip rows not in the right starting status. "Per page" (10/20/50/100) is kept in the URL (`per`) and remembered per table in `localStorage`.
-- **Portal-only endpoints:** `GET /api/{submissions|contact-submissions|return-requests}/:id`, the `status` filter on those three lists, `GET /api/inbox/counts`, `GET /api/dashboard` (Home metrics, banners, setup guide), and `POST /api/setup` (setup-guide flags `setup_*` in `app_settings`; a successful `/api/sms/test` sets `setup_test_sms_sent`).
+- **Portal-only endpoints:** `GET /api/{submissions|contact-submissions|return-requests}/:id`, the `status` filter on those three lists, `GET /api/inbox/counts`, `GET /api/dashboard` (Home metrics, banners, setup guide), and `POST /api/setup` (setup-guide flags `setup_*` in `app_settings`: `checkout_phone_done`, `guide_dismissed`, `chat_embed_done`, `chat_guide_dismissed`; a successful `/api/sms/test` sets `setup_test_sms_sent`). Home also shows live chat: `/api/dashboard` returns `chat: { configured, recipientsSet, embedDone, dismissed }`, and the portal loads open/unanswered counts and the office-hours flag from the chat service's `/api/agent/stats` on its own, so a chat outage shows a banner instead of breaking Home.
 
 The CSP middleware sets `frame-ancestors` from `ALLOWED_ORIGINS` so the admin can frame it — keep new origins in sync there.
 
@@ -110,6 +110,8 @@ Tests: `node --test test/*.test.js`.
 Two Multer instances (`upload` for ID photos, `returnsUpload` for return attachments), both writing to `./uploads/` with a 5MB image-only filter. Files are served read-only at `/view-uploads/*`. The `uploads/` directory is preserved across deploys (excluded from rsync) — never `rm -rf` it.
 
 ### Settings vs secrets
+
+Boot-time cleanup in the SMS migration deletes only the retired `sms_api_key` and `sms_enabled` rows. Never add a live `SETTINGS` key to that list: it would be wiped on every restart (this is how `sms_sender_name` used to disappear after each deploy).
 
 **Secrets and infrastructure stay in `.env` only** — DB, Brevo, `MAIL_FROM`, admin/JWT secrets, `ALLOWED_ORIGINS`, Shopify credentials, `SEMAPHORE_API_KEY`, webhook secret, URLs, `TESTING_MODE`. Never store these in the DB or return their values to the portal (it may only report set / not set).
 
