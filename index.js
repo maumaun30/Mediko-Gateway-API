@@ -3440,7 +3440,10 @@ function linkPreviewHosts() {
 app.get("/api/chat/link-preview", requireAdmin, async (req, res) => {
   const url = typeof req.query.url === "string" ? req.query.url.trim().slice(0, 2000) : "";
   const handle = productHandleFromUrl(url, linkPreviewHosts());
-  if (!handle) return res.status(400).json({ error: "Only product links from the store get a preview" });
+  if (!handle) {
+    log("info", "chat_link_preview_miss", { reason: "not_store_product_link", host: (() => { try { return new URL(url).host; } catch { return null; } })() });
+    return res.status(400).json({ error: "Only product links from the store get a preview" });
+  }
   if (!process.env.SHOPIFY_SHOP_DOMAIN) return res.status(503).json({ error: "Shopify not configured" });
   try {
     const data = await shopifyGraphQL(
@@ -3456,7 +3459,11 @@ app.get("/api/chat/link-preview", requireAdmin, async (req, res) => {
       { identifier: { handle } },
     );
     const preview = productToPreview(data && data.product, url);
-    if (!preview) return res.status(404).json({ error: "Product not found or not published" });
+    if (!preview) {
+      log("info", "chat_link_preview_miss", { reason: data && data.product ? `status_${data.product.status}` : "not_found", handle });
+      return res.status(404).json({ error: "Product not found or not published" });
+    }
+    log("info", "chat_link_preview_ok", { handle });
     res.json({ preview });
   } catch (err) {
     log("error", "chat_link_preview_failed", { message: err.message });
