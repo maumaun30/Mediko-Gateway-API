@@ -2574,7 +2574,10 @@ app.get("/api/inbox/counts", requireAdmin, async (_req, res) => {
 
 // ── Setup guide flags (Home) ──────────────────────────────────────────────────
 // Internal flags, not operator settings, so they live outside SETTINGS.
-const SETUP_FLAGS = ["setup_checkout_phone_done", "setup_test_sms_sent", "setup_guide_dismissed"];
+const SETUP_FLAGS = [
+  "setup_checkout_phone_done", "setup_test_sms_sent", "setup_guide_dismissed",
+  "setup_chat_embed_done", "setup_chat_guide_dismissed",
+];
 
 async function setSetupFlag(key, on, by) {
   await queryAsync(
@@ -2586,7 +2589,10 @@ async function setSetupFlag(key, on, by) {
 
 app.post("/api/setup", requireAdmin, async (req, res) => {
   const body = req.body || {};
-  const map = { checkout_phone_done: "setup_checkout_phone_done", guide_dismissed: "setup_guide_dismissed" };
+  const map = {
+    checkout_phone_done: "setup_checkout_phone_done", guide_dismissed: "setup_guide_dismissed",
+    chat_embed_done: "setup_chat_embed_done", chat_guide_dismissed: "setup_chat_guide_dismissed",
+  };
   const keys = Object.keys(body).filter((k) => map[k] && typeof body[k] === "boolean");
   if (!keys.length) return res.status(400).json({ error: "Nothing to update." });
   try {
@@ -2643,6 +2649,13 @@ app.get("/api/dashboard", requireAdmin, async (_req, res) => {
         checkoutPhoneDone: Boolean(flags.setup_checkout_phone_done),
         testSmsSent: Boolean(flags.setup_test_sms_sent),
         dismissed: Boolean(flags.setup_guide_dismissed),
+      },
+      // Live chat setup. Counts come from the chat service (portal → /api/agent/stats).
+      chat: {
+        configured: chatSecretOk() && Boolean(process.env.CHAT_API_URL),
+        recipientsSet: chatAlertRecipients().length > 0,
+        embedDone: Boolean(flags.setup_chat_embed_done),
+        dismissed: Boolean(flags.setup_chat_guide_dismissed),
       },
     });
   } catch (err) {
@@ -3573,8 +3586,10 @@ async function ensureSmsTable() {
     ensureColumnFor("sms_notifications", "tracking_url", "TEXT NULL");
     ensureColumnFor("sms_notifications", "attempts", "INT NOT NULL DEFAULT 0");
     // An earlier build let the portal save the Semaphore key in the DB. Secrets
-    // belong in .env only, so drop any copy that was saved.
-    await queryAsync("DELETE FROM app_settings WHERE setting_key IN ('sms_api_key', 'sms_sender_name', 'sms_enabled')");
+    // belong in .env only, so drop any copy that was saved. Only the secret and
+    // the retired `sms_enabled` key: `sms_sender_name` is a live portal setting
+    // (see SETTINGS), and deleting it here wiped it on every restart/deploy.
+    await queryAsync("DELETE FROM app_settings WHERE setting_key IN ('sms_api_key', 'sms_enabled')");
     log("info", "migration_sms_tables_ready");
   } catch (err) {
     log("error", "migration_sms_tables_failed", { message: err.message });
