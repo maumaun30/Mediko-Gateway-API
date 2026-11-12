@@ -13,6 +13,7 @@ const {
   verifyChatEventSignature, chatDeepLink, buildStaffAlertMail, validateChatEvent, maskId, redactPath, legacyChatRedirect,
   productHandleFromUrl, productToPreview,
 } = require("./lib/chat");
+const { isAccessDenied } = require("./lib/shopify");
 
 const app = express();
 app.set("trust proxy", 1);
@@ -855,6 +856,13 @@ async function shopifyGraphQL(query, variables = {}, { retryOn401 = true } = {})
     const err = new Error(`Shopify ${res.status}`);
     err.status = res.status;
     throw err;
+  }
+  // Missing scope: the cached minted token predates a newly approved scope
+  // (e.g. read_products). Mint a fresh token once and retry.
+  if (isAccessDenied(json) && retryOn401 && !process.env.SHOPIFY_ADMIN_TOKEN) {
+    log("warn", "shopify_access_denied", { retrying: true });
+    invalidateAdminToken();
+    return shopifyGraphQL(query, variables, { retryOn401: false });
   }
   if (Array.isArray(json.errors) && json.errors.length) {
     throw new Error(json.errors.map((e) => e.message).join("; "));
