@@ -1,0 +1,55 @@
+{%- comment -%}
+  Mediko live chat widget (app embed).
+  Loads the widget bundle built from mediko-widget (`npm run build:embed`),
+  which mounts itself in a Shadow DOM at #mediko-chat-root.
+{%- endcomment -%}
+
+{%- liquid
+  assign show_widget = false
+  if block.settings.page_handles == blank
+    assign show_widget = true
+  elsif request.page_type == 'page'
+    assign handles = block.settings.page_handles | split: ','
+    for handle in handles
+      assign wanted = handle | strip
+      if page.handle == wanted
+        assign show_widget = true
+        break
+      endif
+    endfor
+  endif
+-%}
+
+{%- if show_widget -%}
+  {%- if block.settings.prefill_customer and customer -%}
+    <script>
+      window.MEDIKO_CUSTOMER = {
+        name: {{ customer.name | json }},
+        email: {{ customer.email | json }},
+        phone: {{ customer.phone | default: '' | json }}
+      };
+    </script>
+  {%- endif -%}
+  <script src="{{ 'mediko-chat.js' | asset_url }}" defer></script>
+{%- endif -%}
+
+{% schema %}
+{
+  "name": "Chat widget",
+  "target": "body",
+  "settings": [
+    {
+      "type": "text",
+      "id": "page_handles",
+      "label": "Show only on these pages",
+      "info": "Comma-separated page handles, e.g. test-page. Leave blank to show on every page."
+    },
+    {
+      "type": "checkbox",
+      "id": "prefill_customer",
+      "label": "Prefill logged-in customer details",
+      "default": true
+    }
+  ]
+}
+{% endschema %}
