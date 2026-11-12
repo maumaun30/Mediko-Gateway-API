@@ -11,6 +11,7 @@ const rateLimit = require("express-rate-limit");
 const jwt = require("jsonwebtoken");
 const {
   verifyChatEventSignature, chatDeepLink, buildStaffAlertMail, validateChatEvent, maskId, redactPath, legacyChatRedirect,
+  productHandleFromUrl, productToPreview,
 } = require("./lib/chat");
 
 const app = express();
@@ -3418,6 +3419,41 @@ app.get("/api/chat/customer", requireAdmin, async (req, res) => {
   } catch (err) {
     log("error", "chat_customer_lookup_failed", { message: err.message });
     res.status(500).json({ error: "Customer lookup failed" });
+  }
+});
+
+// Link preview for a store product URL the agent is about to send. Built from
+// the Admin API (needs read_products); the storefront blocks server fetches.
+function linkPreviewHosts() {
+  return String(process.env.LINK_PREVIEW_HOSTS || "store.mediko.ph,mediko.ph")
+    .split(",").map((h) => h.trim().toLowerCase()).filter(Boolean);
+}
+
+app.get("/api/chat/link-preview", requireAdmin, async (req, res) => {
+  const url = typeof req.query.url === "string" ? req.query.url.trim().slice(0, 2000) : "";
+  const handle = productHandleFromUrl(url, linkPreviewHosts());
+  if (!handle) return res.status(400).json({ error: "Only product links from the store get a preview" });
+  if (!process.env.SHOPIFY_SHOP_DOMAIN) return res.status(503).json({ error: "Shopify not configured" });
+  try {
+    const data = await shopifyGraphQL(
+      `query ChatLinkPreview($identifier: ProductIdentifierInput!) {
+         product: productByIdentifier(identifier: $identifier) {
+           title
+           description(truncateAt: 200)
+           status
+           featuredMedia { preview { image { url(transform: { maxWidth: 400 }) } } }
+           priceRangeV2 { minVariantPrice { amount currencyCode } }
+         }
+       }`,
+      { identifier: { handle } },
+    );
+    const preview = productToPreview(data && data.product, url);
+    if (!preview) return res.status(404).json({ error: "Product not found or not published" });
+    res.json({ preview });
+  } catch (err) {
+    log("error", "chat_link_preview_failed", { message: err.message });
+    const scope = /access|scope|read_products/i.test(err.message || "");
+    res.status(500).json({ error: scope ? "Approve the read_products permission for MedikoPH Gateway in Shopify admin" : "Preview lookup failed" });
   }
 });
 
