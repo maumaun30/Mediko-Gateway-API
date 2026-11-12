@@ -1,7 +1,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const crypto = require('crypto')
-const { verifyChatEventSignature, chatDeepLink, buildStaffAlertMail, validateChatEvent, subjectName, maskId, redactPath } = require('../lib/chat')
+const { verifyChatEventSignature, chatDeepLink, legacyChatRedirect, buildStaffAlertMail, validateChatEvent, subjectName, maskId, redactPath } = require('../lib/chat')
 
 const S = 'x'.repeat(32)
 const sig = (ts, body, s = S) => crypto.createHmac('sha256', s).update(`${ts}.${body}`).digest('hex')
@@ -30,8 +30,16 @@ test('missing/garbage timestamp or signature → false', () => {
   assert.equal(verifyChatEventSignature(body, '1000000', undefined, S, 1000000), false)
   assert.equal(verifyChatEventSignature(body, '1000000', 'zz', S, 1000000), false)
 })
-test('chatDeepLink', () => assert.equal(chatDeepLink('abc', 'https://admin.shopify.com/store/mediko/apps/gw/'), 'https://admin.shopify.com/store/mediko/apps/gw/chats/abc'))
-test('chatDeepLink encodes session id', () => assert.equal(chatDeepLink('a/b', 'https://x.y'), 'https://x.y/chats/a%2Fb'))
+test('chatDeepLink points at the portal page under /admin-dashboard', () => assert.equal(chatDeepLink('abc', 'https://admin.shopify.com/store/mediko/apps/gw/'), 'https://admin.shopify.com/store/mediko/apps/gw/admin-dashboard/chats/abc'))
+test('chatDeepLink encodes session id', () => assert.equal(chatDeepLink('a/b', 'https://x.y'), 'https://x.y/admin-dashboard/chats/a%2Fb'))
+test('chatDeepLink does not double /admin-dashboard when the base already has it', () => assert.equal(chatDeepLink('abc', 'https://x.y/admin-dashboard/'), 'https://x.y/admin-dashboard/chats/abc'))
+test('legacyChatRedirect maps old /chats/<id> links to the portal, keeping the query', () => {
+  const id = 'f2d50cbc-648f-401b-97bd-1f8d1a74c66d'
+  assert.equal(legacyChatRedirect(`/chats/${id}`, '?host=abc&embedded=1'), `/admin-dashboard/chats/${id}?host=abc&embedded=1`)
+  assert.equal(legacyChatRedirect(`/chats/${id}`, ''), `/admin-dashboard/chats/${id}`)
+  assert.equal(legacyChatRedirect('/chats/not-an-id', ''), null)
+  assert.equal(legacyChatRedirect('/chats', ''), '/admin-dashboard/chats')
+})
 test('staff mail escapes HTML', () => {
   const m = buildStaffAlertMail({ type: 'new_conversation', name: '<b>x</b>', email: 'a@b.c', phone: '639171234567', text: 'hi' }, 'https://l')
   assert.match(m.subject, /^New chat from/)
