@@ -10,7 +10,7 @@ const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 const jwt = require("jsonwebtoken");
 const {
-  verifyChatEventSignature, chatDeepLink, buildStaffAlertMail, validateChatEvent, maskId, redactPath,
+  verifyChatEventSignature, chatDeepLink, buildStaffAlertMail, validateChatEvent, maskId, redactPath, legacyChatRedirect,
 } = require("./lib/chat");
 
 const app = express();
@@ -2522,6 +2522,13 @@ app.use("/admin-dashboard", (req, res, next) => {
 
 // The portal is one HTML file with path-based pages (/admin-dashboard/applications/12,
 // …), so any path that isn't a real file serves index.html.
+// Old chat alert links (/chats/<id>) → the portal page. See legacyChatRedirect.
+app.get(/^\/chats(\/.*)?$/, (req, res, next) => {
+  const q = req.originalUrl.indexOf("?");
+  const to = legacyChatRedirect(req.path, q === -1 ? "" : req.originalUrl.slice(q));
+  return to ? res.redirect(302, to) : next();
+});
+
 app.get(/^\/admin-dashboard(\/.*)?$/, (req, res, next) => {
   if (/\.[a-z0-9]+$/i.test(req.path)) return next();
   res.sendFile(path.join(__dirname, "admin-portal", "index.html"));
