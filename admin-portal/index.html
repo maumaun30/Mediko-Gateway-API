@@ -2145,13 +2145,35 @@
           ${removable ? '<s-button id="chat-preview-remove" variant="tertiary" icon="x" accessibilityLabel="Remove preview"></s-button>' : ''}
         </s-stack></s-box>`;
     }
+    // First product link in a message ("https://…/products/…"), trailing punctuation dropped.
+    // The server decides whether it is a store link (400 otherwise).
+    const PRODUCT_LINK_RE = /https:\/\/[^\s<>"]+\/products\/[^\s<>"]+/i;
+    const productLinkIn = (text) => { const m = PRODUCT_LINK_RE.exec(String(text || '')); return m ? m[0].replace(/[.,!?;:)'"]+$/, '') : null; };
+    // Customer messages: Gateway builds its own card (Admin API), never trusting the
+    // widget. Skipped when the customer removed the card (hidePreview). One lookup per link.
+    const userPreviews = new Map(); // url → Promise<preview|null>
+    const userPreview = (url) => {
+      if (!userPreviews.has(url)) {
+        userPreviews.set(url, api(`/api/chat/link-preview?url=${encodeURIComponent(url)}`).then((r) => r.preview || null).catch(() => null));
+      }
+      return userPreviews.get(url);
+    };
+    function fillUserPreviews() {
+      $msgs.querySelectorAll('[data-pv-url]').forEach((el) => {
+        const url = el.dataset.pvUrl;
+        el.removeAttribute('data-pv-url');
+        userPreview(url).then((p) => { if (p && el.isConnected) { el.innerHTML = previewCard(p); scrollThread(false); } });
+      });
+    }
     const msgHtml = (m) => {
       const agent = isAgentRole(m.role);
+      const userLink = !agent && !m.hidePreview ? productLinkIn(m.content) : null;
       return `<div class="chat-msg ${agent ? 'from-agent' : 'from-user'}">
         <s-box padding="small-200" borderRadius="large" background="${agent ? 'strong' : 'base'}" border="base">
           <s-stack gap="none">
             <s-text><span class="prewrap">${esc(m.content)}</span></s-text>
             ${m.preview ? previewCard(m.preview) : ''}
+            ${userLink ? `<div data-pv-url="${esc(userLink)}"></div>` : ''}
             <s-text color="subdued"><span class="nowrap">${esc(agent ? 'Mediko Support · ' : '')}${esc(fmtShort(chatTime(m.created_at)))}</span></s-text>
           </s-stack>
         </s-box></div>`;
@@ -2166,6 +2188,7 @@
       const list = st.messages.filter(shownRole);
       $msgs.innerHTML = list.length ? list.map(msgHtml).join('') : '<s-text color="subdued">No messages yet.</s-text>';
       scrollThread(true);
+      fillUserPreviews();
     }
     function appendMessage(m) {
       if (!shownRole(m)) return;
@@ -2175,6 +2198,7 @@
       if (wasEmpty) { renderMessages(); return; }
       $msgs.insertAdjacentHTML('beforeend', msgHtml(m));
       scrollThread(isAgentRole(m.role));
+      fillUserPreviews();
     }
     // Fetched history + in-memory messages (live events that arrived during a
     // fetch), deduped by id, oldest first; ties keep server order.
@@ -2265,8 +2289,7 @@
     // The first store product link in the draft gets a preview card above the
     // box; × removes it (and it stays removed for that link). It is sent with the reply.
     const $preview = byId('chat-preview');
-    const LINK_RE = /https:\/\/[^\s<>"]+\/products\/[^\s<>"]+/i;
-    const draftLink = () => { const m = LINK_RE.exec(String($input.value || '')); return m ? m[0].replace(/[.,!?;:)'"]+$/, '') : null; };
+    const draftLink = () => productLinkIn($input.value);
     function renderPreview() {
       const pv = st.preview;
       if (!pv) { $preview.innerHTML = ''; return; }
