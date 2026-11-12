@@ -350,6 +350,7 @@
     $app.innerHTML = `<s-page heading="Home"><s-stack gap="base">
       ${pageTitle('Home')}
       ${banners.join('')}
+      <div id="home-chat"></div>
       <s-grid gap="base" gridTemplateColumns="repeat(auto-fit, minmax(14rem, 1fr))">
         ${metric('Pending Senior/PWD', num(c.applications.pending), 'View pending →', `${BASE}/applications?status=pending`)}
         ${metric('Pending messages', num(c.contact.pending), 'View pending →', `${BASE}/requests/messages?status=pending`)}
@@ -372,6 +373,80 @@
     });
     on('open-test-sms', 'click', () => showModal('test-sms-modal'));
     wireTestSms(() => viewHome());
+    homeChat(d.chat || {});
+  }
+
+  // Home › live chat: counts from the chat service plus a setup guide. Loads on
+  // its own so a chat-service outage never breaks the rest of Home.
+  async function homeChat(cs) {
+    const host = byId('home-chat');
+    if (!host) return;
+    let stats = null, down = false;
+    if (cs.configured) {
+      try { stats = await chatClient.api('/api/agent/stats'); } catch { down = true; }
+    }
+    if (!byId('home-chat')) return; // navigated away meanwhile
+
+    const parts = [];
+    if (down) {
+      parts.push(`<s-banner tone="critical" heading="Chat service is offline">
+        Customers can’t reach live chat right now. It reconnects on its own once the chat server is back.</s-banner>`);
+    } else if (stats && stats.unanswered > 0) {
+      parts.push(`<s-banner tone="warning" heading="${esc(plural(stats.unanswered, 'chat'))} waiting for a reply">
+        <s-button slot="secondary-actions" href="${BASE}/chats">Open Chats</s-button></s-banner>`);
+    }
+    if (cs.configured) {
+      const val = (v) => (stats ? num(v) : '—');
+      parts.push(`<s-grid gap="base" gridTemplateColumns="repeat(auto-fit, minmax(14rem, 1fr))">
+        <s-section><s-stack gap="small-200"><s-text color="subdued">Unanswered chats</s-text><s-heading>${val(stats?.unanswered)}</s-heading>
+          <s-link href="${BASE}/chats">Open Chats →</s-link></s-stack></s-section>
+        <s-section><s-stack gap="small-200"><s-text color="subdued">Open chats</s-text><s-heading>${val(stats?.open)}</s-heading>
+          <s-text color="subdued">${stats ? 'Live from the chat service' : 'Couldn’t load counts'}</s-text></s-stack></s-section>
+      </s-grid>`);
+    }
+
+    const steps = [
+      { done: Boolean(cs.configured), title: 'Connect the chat service',
+        note: 'Set CHAT_API_URL and CHAT_AGENT_SECRET in the server .env (your developer).' },
+      { done: Boolean(cs.recipientsSet), title: 'Add chat alert recipients',
+        note: 'Staff get an email when a chat starts or goes unanswered.',
+        action: `<s-button href="${BASE}/settings">Open Settings</s-button>` },
+      { done: stats ? stats.officeHoursEnabled : false, title: 'Turn on office hours',
+        note: 'Outside office hours the widget shows Offline and the away message. Set them on the Settings page’s Chat office hours card.',
+        action: `<s-button href="${BASE}/settings">Open Settings</s-button>` },
+      { done: Boolean(cs.embedDone), title: 'Turn on the chat widget in your theme',
+        note: 'Theme editor › App embeds › Chat widget. Use “Show only on these pages” to try it on one page first.',
+        action: `<s-stack direction="inline" gap="small-200"><s-button href="shopify://admin/themes/current/editor?context=apps" target="_top">Open theme editor</s-button><s-button id="mark-chat-embed-done">Mark as done</s-button></s-stack>` },
+    ];
+    const doneCount = steps.filter((x) => x.done).length;
+    if (!cs.dismissed && doneCount < steps.length) {
+      parts.push(`<s-section heading="Set up live chat">
+        <s-stack gap="base">
+          <s-stack direction="inline" gap="small" alignItems="center">
+            <s-text color="subdued">Customers chat with your team from the storefront; you answer in Chats.</s-text>
+            <s-badge>${doneCount} of ${steps.length} done</s-badge>
+          </s-stack>
+          ${steps.map((st) => `<s-box padding="small" borderRadius="base" ${st.done ? '' : 'background="subdued"'}>
+            <s-stack gap="small-200">
+              <s-stack direction="inline" gap="small" alignItems="center">
+                <s-badge tone="${st.done ? 'success' : 'neutral'}">${st.done ? 'Done' : 'To do'}</s-badge>
+                <s-text type="strong">${esc(st.title)}</s-text>
+              </s-stack>
+              ${st.done ? '' : `<s-text color="subdued">${esc(st.note)}</s-text>${st.action || ''}`}
+            </s-stack></s-box>`).join('')}
+          <s-button variant="tertiary" id="dismiss-chat-guide">Dismiss</s-button>
+        </s-stack></s-section>`);
+    }
+    host.innerHTML = parts.length ? `<s-stack gap="base">${parts.join('')}</s-stack>` : '';
+
+    on('mark-chat-embed-done', 'click', async () => {
+      try { await api('/api/setup', { method: 'POST', body: { chat_embed_done: true } }); toast('Marked as done'); viewHome(); }
+      catch (e) { toast(`Couldn’t save: ${e.message}`, true); }
+    });
+    on('dismiss-chat-guide', 'click', async () => {
+      try { await api('/api/setup', { method: 'POST', body: { chat_guide_dismissed: true } }); viewHome(); }
+      catch (e) { toast(`Couldn’t save: ${e.message}`, true); }
+    });
   }
 
   // Shared "Send test SMS" modal (Home + Shipping SMS).
@@ -1644,6 +1719,16 @@
   };
   const CHAT_DAYS = [['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday'], ['sun', 'Sunday']];
   const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+  // 30-minute steps for the office-hours selects, labelled 12-hour ("8:00 AM").
+  // A saved value off the grid (e.g. 08:15) is kept as its own option.
+  function chatTimeOptions(current) {
+    const fmt = (v) => { const [h, m] = v.split(':').map(Number); return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`; };
+    const vals = [];
+    for (let h = 0; h < 24; h++) for (const m of ['00', '30']) vals.push(`${String(h).padStart(2, '0')}:${m}`);
+    vals.push('23:59');
+    if (current && HHMM_RE.test(current) && !vals.includes(current)) vals.push(current);
+    return vals.sort().map((v) => [v, v === '23:59' ? '11:59 PM (end of day)' : fmt(v)]);
+  }
 
   async function viewSettings() {
     const { settings, secrets } = await api('/api/settings');
@@ -1748,39 +1833,98 @@
     const bh = data.businessHours || {};
     const hours = bh.hours || {};
     const unanswered = data.unansweredMinutes ?? 10;
-    const dayRow = ([k, label]) => {
-      const h = hours[k] || { open: false, start: '08:00', end: '17:00' };
-      return `<s-stack direction="inline" gap="base" alignItems="end">
-        <s-switch id="chat-${k}-open" label="${label}" ${h.open ? 'checked' : ''}></s-switch>
-        <s-text-field id="chat-${k}-start" label="Start (HH:MM)" labelAccessibilityVisibility="exclusive" placeholder="HH:MM" maxLength="5" value="${esc(h.start)}"></s-text-field>
-        <s-text-field id="chat-${k}-end" label="End (HH:MM)" labelAccessibilityVisibility="exclusive" placeholder="HH:MM" maxLength="5" value="${esc(h.end)}"></s-text-field>
-      </s-stack>`;
+    // Compact week editor: Mon–Sun chips toggle open days; one time range for
+    // all open days, or a short row per open day when "Different hours per day".
+    const st = { open: {}, start: {}, end: {} };
+    CHAT_DAYS.forEach(([k]) => {
+      const h = hours[k] || {};
+      st.open[k] = Boolean(h.open);
+      st.start[k] = HHMM_RE.test(h.start || '') ? h.start : '08:00';
+      st.end[k] = HHMM_RE.test(h.end || '') ? h.end : '17:00';
+    });
+    const openKeys = () => CHAT_DAYS.map(([k]) => k).filter((k) => st.open[k]);
+    const firstOpen = () => openKeys()[0] || 'mon';
+    st.perDay = new Set(openKeys().map((k) => `${st.start[k]}-${st.end[k]}`)).size > 1;
+
+    const timeSelect = (id, label, value) => `<s-select id="${id}" label="${label}" labelAccessibilityVisibility="exclusive">
+      ${chatTimeOptions(value).map(([v, txt]) => `<s-option value="${v}" ${v === value ? 'selected' : ''}>${txt}</s-option>`).join('')}
+    </s-select>`;
+    const dayChips = () => `<s-stack direction="inline" gap="small-200">${CHAT_DAYS.map(([k, label]) =>
+      `<s-clickable-chip id="chat-day-${k}" color="${st.open[k] ? 'strong' : 'subdued'}"
+        accessibilityLabel="${label}: ${st.open[k] ? 'open, click to close' : 'closed, click to open'}">${label.slice(0, 3)}</s-clickable-chip>`).join('')}</s-stack>`;
+    const hoursBody = () => {
+      if (!openKeys().length) return '<s-text color="subdued">No open days: chat shows Offline all week.</s-text>';
+      if (!st.perDay) {
+        const k = firstOpen();
+        return `<s-stack direction="inline" gap="small" alignItems="center">
+          ${timeSelect('chat-all-start', 'Opens', st.start[k])}<s-text color="subdued">to</s-text>${timeSelect('chat-all-end', 'Closes', st.end[k])}
+        </s-stack>`;
+      }
+      return `<s-stack gap="small-200">${CHAT_DAYS.filter(([k]) => st.open[k]).map(([k, label]) =>
+        `<s-stack direction="inline" gap="small" alignItems="center">
+          <s-box inlineSize="3rem"><s-text>${label.slice(0, 3)}</s-text></s-box>
+          ${timeSelect(`chat-${k}-start`, `${label} opens`, st.start[k])}<s-text color="subdued">to</s-text>${timeSelect(`chat-${k}-end`, `${label} closes`, st.end[k])}
+        </s-stack>`).join('')}</s-stack>`;
     };
+    // Copy the visible selects into st before any re-render.
+    const readHours = () => {
+      if (!st.perDay) {
+        const a = byId('chat-all-start'), b = byId('chat-all-end');
+        if (a && b) CHAT_DAYS.forEach(([k]) => { st.start[k] = a.value; st.end[k] = b.value; });
+      } else {
+        openKeys().forEach((k) => {
+          const a = byId(`chat-${k}-start`), b = byId(`chat-${k}-end`);
+          if (a) st.start[k] = a.value;
+          if (b) st.end[k] = b.value;
+        });
+      }
+    };
+    const renderWeek = () => {
+      byId('chat-week').innerHTML = `<s-stack gap="small">
+        ${dayChips()}
+        ${hoursBody()}
+        ${openKeys().length > 1 ? `<s-switch id="chat-perday" label="Different hours per day" ${st.perDay ? 'checked' : ''}></s-switch>` : ''}
+        <s-text id="chat-hours-error" tone="critical"></s-text>
+      </s-stack>`;
+      CHAT_DAYS.forEach(([k]) => on(`chat-day-${k}`, 'click', () => {
+        readHours();
+        st.open[k] = !st.open[k];
+        if (st.open[k] && !st.perDay) { const f = openKeys().find((x) => x !== k); if (f) { st.start[k] = st.start[f]; st.end[k] = st.end[f]; } }
+        renderWeek();
+      }));
+      on('chat-perday', 'change', (e) => {
+        readHours();
+        st.perDay = Boolean(e.currentTarget.checked);
+        if (!st.perDay) { const f = firstOpen(); CHAT_DAYS.forEach(([k]) => { st.start[k] = st.start[f]; st.end[k] = st.end[f]; }); }
+        renderWeek();
+      });
+    };
+
     host.innerHTML = wrap(`<s-stack gap="base">
       <s-switch id="chat-enabled" label="Use office hours" details="When off, chat is treated as always open." ${bh.enabled === false ? '' : 'checked'}></s-switch>
-      ${bh.timezone ? `<s-text color="subdued">Timezone: <span class="mono">${esc(bh.timezone)}</span></s-text>` : ''}
-      ${CHAT_DAYS.map(dayRow).join('')}
+      <s-stack gap="small-200">
+        <s-text type="strong">Open days and hours</s-text>
+        <div id="chat-week"></div>
+        ${bh.timezone ? `<s-text color="subdued">Timezone: <span class="mono">${esc(bh.timezone)}</span></s-text>` : ''}
+      </s-stack>
       <s-text-area id="chat-away" label="Away message" rows="3" maxLength="1000" value="${esc(bh.awayMessage || '')}"></s-text-area>
       <s-number-field id="chat-unanswered" label="Alert when unanswered for (minutes)" min="1" max="240" value="${esc(unanswered)}"></s-number-field>
       <s-stack direction="inline"><s-button id="chat-save" variant="primary">Save chat settings</s-button></s-stack>
     </s-stack>`);
+    renderWeek();
 
     on('chat-save', 'click', async () => {
       const btn = byId('chat-save');
-      let bad = false;
+      readHours();
       const body = { enabled: Boolean(byId('chat-enabled').checked), awayMessage: String(byId('chat-away').value || ''), hours: {} };
-      CHAT_DAYS.forEach(([k]) => {
-        const start = String(byId(`chat-${k}-start`).value || '').trim();
-        const end = String(byId(`chat-${k}-end`).value || '').trim();
-        byId(`chat-${k}-start`).error = HHMM_RE.test(start) ? '' : 'Use HH:MM (24-hour)';
-        byId(`chat-${k}-end`).error = HHMM_RE.test(end) ? '' : 'Use HH:MM (24-hour)';
-        if (!HHMM_RE.test(start) || !HHMM_RE.test(end)) bad = true;
-        body.hours[k] = { open: Boolean(byId(`chat-${k}-open`).checked), start, end };
-      });
+      const badDay = openKeys().find((k) => !(HHMM_RE.test(st.start[k]) && HHMM_RE.test(st.end[k]) && st.start[k] < st.end[k]));
+      CHAT_DAYS.forEach(([k]) => { body.hours[k] = { open: st.open[k], start: st.start[k], end: st.end[k] }; });
+      const errEl = byId('chat-hours-error');
+      if (errEl) errEl.textContent = badDay ? `${CHAT_DAYS.find(([k]) => k === badDay)[1]}: closing time must be after opening time.` : '';
       const mins = Number(byId('chat-unanswered').value);
       const minsOk = Number.isInteger(mins) && mins >= 1 && mins <= 240;
       byId('chat-unanswered').error = minsOk ? '' : 'Enter a whole number from 1 to 240';
-      if (bad || !minsOk) { toast('Couldn’t save: check the highlighted fields', true); return; }
+      if (badDay || !minsOk) { toast('Couldn’t save: check the highlighted fields', true); return; }
       btn.disabled = true; loading(true);
       try {
         await chatClient.api('/api/agent/settings', { method: 'PUT', body: { businessHours: body, unansweredMinutes: mins } });
