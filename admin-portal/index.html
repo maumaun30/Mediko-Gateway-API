@@ -2262,7 +2262,7 @@
     // The customer's recent orders (by chat email) plus any order number they
     // wrote in the chat ("#1042", "order 1042"). "Insert status" drafts a reply.
     const ORDER_STATE = {
-      processing: ['Processing', 'neutral'], shipped: ['Shipped', 'success'],
+      processing: ['Processing', 'neutral'], shipped: ['Shipped', 'info'], delivered: ['Delivered', 'success'],
       partially_shipped: ['Partially shipped', 'attention'], cancelled: ['Cancelled', 'critical'],
     };
     const orderReplies = new Map(); // button id → reply text

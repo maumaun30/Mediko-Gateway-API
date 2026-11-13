@@ -42,7 +42,7 @@ test('contactMatches: email (any case) or PH mobile in any format', () => {
 
 test('publicOrderStatus: shipped with tracking, no personal data', () => {
   const p = publicOrderStatus(orderFromNode(shippedNode))
-  assert.deepEqual(p, { order: '#1042', state: 'shipped', placedAt: '2026-11-08T03:00:00Z', shippedAt: '2026-11-10T02:00:00Z',
+  assert.deepEqual(p, { order: '#1042', state: 'shipped', placedAt: '2026-11-08T03:00:00Z', shippedAt: '2026-11-10T02:00:00Z', deliveredAt: null,
     carrier: 'J&T Express', trackingNumber: 'JT123', trackingUrl: 'https://jtexpress.ph/track?b=JT123' })
 })
 
@@ -78,4 +78,17 @@ test('orderNameQuery searches with and without "#"; pickOrder needs an exact num
   assert.equal(pickOrder([{ name: '#10021' }, { name: '#1002' }], '1002').name, '#1002')
   assert.equal(pickOrder([{ name: '#10021' }], '1002'), null)
   assert.equal(pickOrder([], '1002'), null)
+})
+
+test('delivered: every fulfillment delivered → state delivered with deliveredAt; reply says na-deliver', () => {
+  const delivered = { ...shippedNode, fulfillments: [{ ...shippedNode.fulfillments[0], displayStatus: 'DELIVERED', deliveredAt: '2026-11-12T05:00:00Z' }] }
+  const o = orderFromNode(delivered)
+  const p = publicOrderStatus(o)
+  assert.equal(p.state, 'delivered')
+  assert.equal(p.deliveredAt, '2026-11-12T05:00:00Z')
+  assert.match(statusReply(o), /Na-deliver na po ang order #1042/)
+  // one of two shipments still in transit → still "shipped"
+  const mixed = { ...delivered, fulfillments: [...delivered.fulfillments, { ...shippedNode.fulfillments[0], displayStatus: 'IN_TRANSIT' }] }
+  assert.equal(publicOrderStatus(orderFromNode(mixed)).state, 'shipped')
+  assert.equal(publicOrderStatus(orderFromNode(shippedNode)).deliveredAt, null)
 })
