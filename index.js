@@ -14,6 +14,7 @@ const {
   productHandleFromUrl, productToPreview,
 } = require("./lib/chat");
 const { isAccessDenied, verifyAppProxy } = require("./lib/shopify");
+const { applicationAdminMail, contactAdminMail, returnAdminMail } = require("./lib/adminEmail");
 const { orderNameQuery, pickOrder, orderStatusResult, ORDER_FIELDS, normalizeOrderNumber, orderFromNode, contactMatches, publicOrderStatus, statusReply } = require("./lib/orders");
 
 const app = express();
@@ -709,28 +710,10 @@ async function sendApplicationEmails(application, reqFiles, metadataStr) {
   const adminMail = {
     from: `"Mediko Gateway" <${process.env.MAIL_FROM}>`,
     ...adminRecipients(),
-    subject: `[Mediko] New application #${insertId} — ${full_name}`,
-    attachments: attachments,
-    html: `
-      <h3 style="color: #2c3e50;">New discount application received</h3>
-      <table border="1" style="border-collapse: collapse; width: 100%; max-width: 600px; font-family: sans-serif;">
-        <tr style="background-color: #f8f9fa;"><td style="padding: 8px; width: 150px;"><strong>App ID</strong></td><td style="padding: 8px;">#${insertId}</td></tr>
-        <tr><td style="padding: 8px;"><strong>Name</strong></td><td style="padding: 8px;">${full_name}</td></tr>
-        <tr><td style="padding: 8px;"><strong>Birthday</strong></td><td style="padding: 8px;">${birthday}</td></tr>
-        <tr><td style="padding: 8px;"><strong>Contact No.</strong></td><td style="padding: 8px;">${contact_number}</td></tr>
-        <tr><td style="padding: 8px;"><strong>Email</strong></td><td style="padding: 8px;">${email_address}</td></tr>
-        <tr><td style="padding: 8px;"><strong>ID Number</strong></td><td style="padding: 8px;">${id_number}</td></tr>
-      </table>
-
-      <h4 style="margin-bottom: 5px; margin-top: 20px;">Technical Metadata:</h4>
-      <table border="1" style="border-collapse: collapse; width: 100%; max-width: 600px; font-family: sans-serif; font-size: 12px; color: #555;">
-        <tr><td style="padding: 6px; width: 150px;"><strong>IP Address</strong></td><td style="padding: 6px;">${meta.ip || "N/A"}</td></tr>
-        <tr><td style="padding: 6px;"><strong>Origin</strong></td><td style="padding: 6px;">${meta.origin || "N/A"}</td></tr>
-        <tr><td style="padding: 6px;"><strong>Browser Agent</strong></td><td style="padding: 6px;">${meta.user_agent || "N/A"}</td></tr>
-        <tr><td style="padding: 6px;"><strong>Referer</strong></td><td style="padding: 6px;">${meta.referer || "N/A"}</td></tr>
-      </table>
-    `,
+    attachments,
+    ...applicationAdminMail({ ...application, insertId }, meta, attachments.length),
   };
+
 
   try {
     await Promise.all([
@@ -1032,19 +1015,9 @@ async function sendContactEmails(submission, metadataStr) {
   const adminMail = {
     from: `"Mediko Gateway" <${process.env.MAIL_FROM}>`,
     ...adminRecipients(),
-    subject: `[Mediko] New contact message #${id} — ${full_name}`,
-    html: `
-      <h3 style="color: #2c3e50;">New contact message</h3>
-      <table border="1" style="border-collapse: collapse; width: 100%; max-width: 600px; font-family: sans-serif;">
-        <tr style="background-color: #f8f9fa;"><td style="padding: 8px; width: 150px;"><strong>Message ID</strong></td><td style="padding: 8px;">#${id}</td></tr>
-        <tr><td style="padding: 8px;"><strong>Name</strong></td><td style="padding: 8px;">${escapeHtml(full_name)}</td></tr>
-        <tr><td style="padding: 8px;"><strong>Email</strong></td><td style="padding: 8px;">${escapeHtml(email_address)}</td></tr>
-        <tr><td style="padding: 8px;"><strong>Contact No.</strong></td><td style="padding: 8px;">${escapeHtml(contact_number)}</td></tr>
-        <tr><td style="padding: 8px; vertical-align: top;"><strong>Message</strong></td><td style="padding: 8px;"><pre style="white-space: pre-wrap; font-family: inherit; margin: 0;">${escapeHtml(message)}</pre></td></tr>
-      </table>
-      ${metaTable(meta)}
-    `,
+    ...contactAdminMail({ ...submission, id }, meta),
   };
+
 
   try {
     await Promise.all([
@@ -1091,23 +1064,10 @@ async function sendReturnEmails(returnReq, files, metadataStr) {
   const adminMail = {
     from: `"Mediko Gateway" <${process.env.MAIL_FROM}>`,
     ...adminRecipients(),
-    subject: `[Mediko] New return request #${id} — ${full_name}`,
     attachments,
-    html: `
-      <h3 style="color: #2c3e50;">New return / refund request received</h3>
-      <table border="1" style="border-collapse: collapse; width: 100%; max-width: 600px; font-family: sans-serif;">
-        <tr style="background-color: #f8f9fa;"><td style="padding: 8px; width: 150px;"><strong>Request ID</strong></td><td style="padding: 8px;">#${id}</td></tr>
-        <tr><td style="padding: 8px;"><strong>Name</strong></td><td style="padding: 8px;">${escapeHtml(full_name)}</td></tr>
-        <tr><td style="padding: 8px;"><strong>Email</strong></td><td style="padding: 8px;">${escapeHtml(email_address)}</td></tr>
-        <tr><td style="padding: 8px;"><strong>Contact No.</strong></td><td style="padding: 8px;">${escapeHtml(contact_number)}</td></tr>
-        <tr><td style="padding: 8px;"><strong>Order Number</strong></td><td style="padding: 8px;">${escapeHtml(order_number)}</td></tr>
-        <tr><td style="padding: 8px; vertical-align: top;"><strong>Items</strong></td><td style="padding: 8px;"><pre style="white-space: pre-wrap; font-family: inherit; margin: 0;">${escapeHtml(items_to_return)}</pre></td></tr>
-        <tr><td style="padding: 8px; vertical-align: top;"><strong>Reason</strong></td><td style="padding: 8px;"><pre style="white-space: pre-wrap; font-family: inherit; margin: 0;">${escapeHtml(reason)}</pre></td></tr>
-        <tr><td style="padding: 8px;"><strong>Attachments</strong></td><td style="padding: 8px;">${attachments.length} image(s)</td></tr>
-      </table>
-      ${metaTable(meta)}
-    `,
+    ...returnAdminMail({ ...returnReq, id }, meta, attachments.length),
   };
+
 
   try {
     await Promise.all([
