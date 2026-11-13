@@ -60,3 +60,14 @@ test('statusReply drafts a Tagalog reply the agent can edit', () => {
   assert.match(statusReply(orderFromNode({ ...shippedNode, displayFulfillmentStatus: 'UNFULFILLED', fulfillments: [] })), /#1042.*inihahanda/)
   assert.match(statusReply(orderFromNode({ ...shippedNode, cancelledAt: '2026-11-09T00:00:00Z' })), /na-cancel.*#1042/i)
 })
+
+test('orderStatusResult: found only when the contact matches; same answer for missing and mismatch', () => {
+  const { orderStatusResult } = require('../lib/orders')
+  const ok = orderStatusResult([shippedNode], '09171234567')
+  assert.equal(ok.found, true)
+  assert.equal(ok.status.order, '#1042')
+  assert.equal(ok.status.trackingNumber, 'JT123')
+  assert.deepEqual(orderStatusResult([shippedNode], 'someone@else.ph'), { found: false })
+  assert.deepEqual(orderStatusResult([], 'maria@example.ph'), { found: false })
+  assert.equal(JSON.stringify(ok).includes('maria'), false)
+})

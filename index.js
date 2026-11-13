@@ -14,7 +14,7 @@ const {
   productHandleFromUrl, productToPreview,
 } = require("./lib/chat");
 const { isAccessDenied } = require("./lib/shopify");
-const { ORDER_FIELDS, normalizeOrderNumber, orderFromNode, contactMatches, publicOrderStatus, statusReply } = require("./lib/orders");
+const { orderStatusResult, ORDER_FIELDS, normalizeOrderNumber, orderFromNode, contactMatches, publicOrderStatus, statusReply } = require("./lib/orders");
 
 const app = express();
 app.set("trust proxy", 1);
@@ -63,9 +63,10 @@ const corsMiddleware = cors({
 
 // The unsubscribe page posts its form back to this host, which isn't in
 // ALLOWED_ORIGINS. That route is token-guarded and credential-free, so skip CORS.
-// /internal/chat-events is server-to-server (HMAC-signed), so it skips CORS too.
+// /internal/chat-events and /internal/order-status are server-to-server
+// (HMAC-signed by the chat service), so they skip CORS too.
 app.use((req, res, next) =>
-  req.path === "/api/unsubscribe" || req.path === "/internal/chat-events"
+  req.path === "/api/unsubscribe" || req.path === "/internal/chat-events" || req.path === "/internal/order-status"
     ? next()
     : corsMiddleware(req, res, next),
 );
@@ -84,6 +85,11 @@ app.post(
   "/internal/chat-events",
   express.raw({ type: "application/json", limit: "256kb" }),
   handleChatEvent,
+);
+app.post(
+  "/internal/order-status",
+  express.raw({ type: "application/json", limit: "8kb" }),
+  handleOrderStatus,
 );
 
 app.use(express.json({ limit: "1mb" }));
@@ -3550,6 +3556,38 @@ async function processChatEvent(event) {
     html: mail.html,
   });
   log("info", "chat_alert_sent", { type: event.type, recipients: to.length });
+}
+
+// Raw-body HMAC check shared by the chat service's signed routes.
+function signedChatBody(req) {
+  const raw = Buffer.isBuffer(req.body) ? req.body : null;
+  if (!raw || !verifyChatEventSignature(raw, req.get("x-mediko-timestamp"), req.get("x-mediko-signature"), process.env.CHAT_AGENT_SECRET)) {
+    return null;
+  }
+  try { return JSON.parse(raw.toString("utf8")); } catch { return undefined; }
+}
+
+// "Track my order" from the widget, relayed (and rate limited) by the chat
+// service. Returns the status only when the email/mobile matches the order.
+async function handleOrderStatus(req, res) {
+  if (!chatSecretOk()) return res.status(503).json({ error: "Chat not configured" });
+  const body = signedChatBody(req);
+  if (body === null) {
+    log("warn", "order_status_rejected", { ip: req.ip });
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  const num = normalizeOrderNumber(body && body.order);
+  const contact = body && typeof body.contact === "string" ? body.contact.trim() : "";
+  if (!num || !contact || contact.length > 254) return res.status(400).json({ error: "Invalid request" });
+  if (!process.env.SHOPIFY_SHOP_DOMAIN) return res.status(503).json({ error: "Shopify not configured" });
+  try {
+    const result = orderStatusResult(await fetchOrderNodes(`name:#${num}`, 1), contact);
+    log("info", "order_status_lookup", { found: result.found });
+    res.json(result);
+  } catch (err) {
+    log("error", "order_status_failed", { message: err.message });
+    res.status(500).json({ error: "Order lookup failed" });
+  }
 }
 
 function handleChatEvent(req, res) {
