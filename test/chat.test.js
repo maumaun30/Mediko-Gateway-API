@@ -44,7 +44,7 @@ test('staff mail escapes HTML', () => {
   const m = buildStaffAlertMail({ type: 'new_conversation', name: '<b>x</b>', email: 'a@b.c', phone: '639171234567', text: 'hi' }, 'https://l')
   assert.match(m.subject, /^New chat from/)
   assert.ok(!m.html.includes('<b>x</b>'))
-  assert.match(m.html, /Open in Gateway/)
+  assert.match(m.html, />Open chat</)
 })
 test('unanswered subject and 300-char cut', () => {
   const m = buildStaffAlertMail({ type: 'unanswered', name: 'N', email: 'a@b.c', phone: '1', text: 'y'.repeat(400) }, 'https://l')
@@ -76,7 +76,7 @@ test('unanswered with null name/phone/email is valid; mail shows Unknown visitor
   assert.equal(m.subject, 'Unanswered chat from Unknown visitor')
   assert.match(m.text, /Name: Unknown visitor/)
   assert.match(m.text, /Email: —/)
-  assert.match(m.html, /Phone:<\/strong> —/)
+  assert.match(m.text, /Mobile: —/)
 })
 test('offline_reply with null email is valid; other checks still apply', () => {
   const off = { type: 'offline_reply', sessionId: 's', name: null, email: null, messages: ['a'], link: 'https://x.y' }
