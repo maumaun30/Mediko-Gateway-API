@@ -65,6 +65,7 @@
   <div id="app"></div>
 
   <script src="/admin-dashboard/chat-connection.js"></script>
+  <script src="/admin-dashboard/chat-orders.js"></script>
   <script>
   'use strict';
 
@@ -2234,9 +2235,12 @@
         <s-divider></s-divider>
         <s-stack gap="small-200"><s-heading>Shopify</s-heading><div id="chat-shopify"><s-text color="subdued">${email ? 'Looking up…' : 'No email to look up.'}</s-text></div></s-stack>
         <s-divider></s-divider>
+        <s-stack gap="small-200"><s-heading>Orders</s-heading><div id="chat-orders"><s-text color="subdued">Loading orders…</s-text></div></s-stack>
+        <s-divider></s-divider>
         <s-stack gap="small-200"><s-heading>Offline replies</s-heading><s-text color="subdued">Replies are emailed if the customer is offline.</s-text></s-stack>
       </s-stack>`;
       on('chat-details-back', 'click', () => showPane('thread'));
+      loadOrders(id);
       if (!email) return;
       let html;
       try {
@@ -2252,6 +2256,71 @@
       }
       const host = byId('chat-shopify');
       if (host && st.selected === id) host.innerHTML = `<s-stack gap="small-200">${html}</s-stack>`;
+    }
+
+    // ── Orders (details pane) ──
+    // The customer's recent orders (by chat email) plus any order number they
+    // wrote in the chat ("#1042", "order 1042"). "Insert status" drafts a reply.
+    const ORDER_STATE = {
+      processing: ['Processing', 'neutral'], shipped: ['Shipped', 'success'],
+      partially_shipped: ['Partially shipped', 'attention'], cancelled: ['Cancelled', 'critical'],
+    };
+    const orderReplies = new Map(); // button id → reply text
+    function mentionedOrderNumber() {
+      for (let i = st.messages.length - 1; i >= 0; i--) {
+        const m = st.messages[i];
+        if (m && m.role === 'user') { const n = window.findOrderNumber(m.content); if (n) return n; }
+      }
+      return null;
+    }
+    function orderHtml(o, mentioned) {
+      const [label, tone] = ORDER_STATE[o.state] || ORDER_STATE.processing;
+      const t = (o.tracking || []).find((x) => x.number || x.url);
+      const trackUrl = t && /^https:\/\//.test(String(t.url || '')) ? t.url : '';
+      const btnId = `order-reply-${orderReplies.size}`;
+      orderReplies.set(btnId, o.reply || '');
+      return `<s-box padding="small-200" borderRadius="base" border="base" ${mentioned ? 'background="subdued"' : ''}>
+        <s-stack gap="small-200">
+          <s-stack direction="inline" gap="small-200" alignItems="center">
+            <s-text type="strong">${esc(o.name)}</s-text>
+            <s-badge tone="${tone}">${esc(label)}</s-badge>
+            ${mentioned ? '<s-badge tone="info">Mentioned</s-badge>' : ''}
+          </s-stack>
+          <s-text color="subdued">${esc(fmtShort(Date.parse(o.createdAt)))}${o.financialStatus ? ` · ${esc(o.financialStatus.replace(/_/g, ' ').toLowerCase())}` : ''}</s-text>
+          ${t ? `<s-text>${esc(t.company || 'Carrier')}${t.number ? ` · <span class="mono">${esc(t.number)}</span>` : ''}</s-text>` : ''}
+          ${trackUrl ? `<s-link href="${esc(trackUrl)}" target="_blank">Track shipment</s-link>` : ''}
+          ${o.reply ? `<s-button id="${btnId}" variant="tertiary">Insert status</s-button>` : ''}
+        </s-stack></s-box>`;
+    }
+    async function loadOrders(id) {
+      const c = st.convs.get(id);
+      const host = byId('chat-orders');
+      if (!c || !host) return;
+      const email = c.email || '';
+      const mentioned = mentionedOrderNumber();
+      let list = [], extra = null, err = null;
+      try {
+        if (email) list = (await api(`/api/chat/orders?email=${encodeURIComponent(email)}`)).orders || [];
+        const inList = mentioned && list.some((o) => String(o.name).replace(/\D/g, '') === mentioned);
+        if (mentioned && !inList) extra = (await api(`/api/chat/order?number=${encodeURIComponent(mentioned)}`)).order || null;
+      } catch (e) { err = e; }
+      const box = byId('chat-orders');
+      if (!box || st.selected !== id) return;
+      orderReplies.clear();
+      if (err) { box.innerHTML = `<s-text color="subdued">${esc(err.status === 503 ? 'Shopify not configured.' : `Lookup failed: ${err.message}`)}</s-text>`; return; }
+      const isMentioned = (o) => mentioned && String(o.name).replace(/\D/g, '') === mentioned;
+      const parts = [];
+      if (extra) parts.push(`<s-text color="subdued">Mentioned in this chat</s-text>${orderHtml(extra, true)}`);
+      else if (mentioned && !list.some(isMentioned)) parts.push(`<s-text color="subdued">Order #${esc(mentioned)} was mentioned but not found.</s-text>`);
+      list.forEach((o) => parts.push(orderHtml(o, isMentioned(o))));
+      box.innerHTML = parts.length ? `<s-stack gap="small-200">${parts.join('')}</s-stack>`
+        : `<s-text color="subdued">${email ? 'No orders for this email.' : 'No email to look up.'}</s-text>`;
+      orderReplies.forEach((text, btnId) => on(btnId, 'click', () => {
+        const cur = String($input.value || '').trim();
+        $input.value = cur ? `${cur}\n${text}` : text;
+        $input.focus();
+        schedulePreview();
+      }));
     }
 
     // ── Selecting a conversation ──
@@ -2399,7 +2468,10 @@
       switch (ev.type) {
         case 'customer_message':
           upsert(ev.conversation);
-          if (sid && sid === st.selected) { hideTyping(); appendMessage(ev.message); renderHead(); markSeen(sid); }
+          if (sid && sid === st.selected) {
+            hideTyping(); appendMessage(ev.message); renderHead(); markSeen(sid);
+            if (window.findOrderNumber(ev.message && ev.message.content)) loadOrders(sid);
+          }
           renderRows();
           break;
         case 'agent_sent': {
