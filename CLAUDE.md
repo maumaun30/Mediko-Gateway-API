@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
-The entire backend lives in **`index.js`** (~1660 lines). It's a single Express 5 app — no router files, no service layer, no ORM. Helpers, mailer templates, Shopify glue, and route handlers are all in this one file. When changing behavior, expect to read the whole file rather than navigate by module.
+Most of the backend still lives in **`index.js`** (one Express 5 app: route handlers, form pipelines, templates, blasts, SMS, live chat). Shared infrastructure is in `lib/`, imported at the top of `index.js` under the same names: `lib/log.js` (`log`), `lib/db.js` (pool, `ensureColumn*` migrations, `queryAsync`), `lib/auth.js` (`requireAdmin`, session-token/dashboard-JWT checks), `lib/settings.js` (`SETTINGS`, `getSetting`, `loadSettings`, `adminRecipients`), `lib/mailer.js` (`transporter`), `lib/shopifyAdmin.js` (`shopifyGraphQL`, token cache). The boot-time migration sequence (`db.getConnection` → `ensure*Table`) stays in `index.js` because it calls table setup from several feature sections. Feature helpers live in `lib/chat.js`, `lib/orders.js`, `lib/adminEmail.js`, `lib/emailFormat.js`, `lib/shopify.js`. Paths inside `lib/` are relative to `lib/` (use `path.join(__dirname, "..", …)` for repo-root files).
 
 ### Three form pipelines, one shape
 
