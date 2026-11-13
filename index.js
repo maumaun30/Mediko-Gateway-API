@@ -13,8 +13,8 @@ const {
   verifyChatEventSignature, chatDeepLink, buildStaffAlertMail, validateChatEvent, maskId, redactPath, legacyChatRedirect,
   productHandleFromUrl, productToPreview,
 } = require("./lib/chat");
-const { isAccessDenied } = require("./lib/shopify");
-const { orderStatusResult, ORDER_FIELDS, normalizeOrderNumber, orderFromNode, contactMatches, publicOrderStatus, statusReply } = require("./lib/orders");
+const { isAccessDenied, verifyAppProxy } = require("./lib/shopify");
+const { orderNameQuery, pickOrder, orderStatusResult, ORDER_FIELDS, normalizeOrderNumber, orderFromNode, contactMatches, publicOrderStatus, statusReply } = require("./lib/orders");
 
 const app = express();
 app.set("trust proxy", 1);
@@ -3470,7 +3470,7 @@ app.get("/api/chat/order", requireAdmin, async (req, res) => {
   if (!num) return res.status(400).json({ error: "Order number required" });
   if (!process.env.SHOPIFY_SHOP_DOMAIN) return res.status(503).json({ error: "Shopify not configured" });
   try {
-    const [node] = await fetchOrderNodes(`name:#${num}`, 1);
+    const node = pickOrder(await fetchOrderNodes(orderNameQuery(num), 5), num);
     res.json({ order: node ? panelOrder(node) : null });
   } catch (err) {
     log("error", "chat_order_failed", { message: err.message });
@@ -3558,6 +3558,30 @@ async function processChatEvent(event) {
   log("info", "chat_alert_sent", { type: event.type, recipients: to.length });
 }
 
+// "Track my order" for logged-in customers, through the Shopify app proxy:
+// the widget calls store.mediko.ph/apps/mediko/orders, Shopify adds
+// logged_in_customer_id and signs the query (shopify.app.toml [app_proxy]).
+// Only state/dates/carrier/tracking are returned.
+app.get("/proxy/orders", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  const v = verifyAppProxy(req.query, process.env.SHOPIFY_CLIENT_SECRET);
+  const shopOk = v.ok && v.shop.toLowerCase() === String(process.env.SHOPIFY_SHOP_DOMAIN || "").toLowerCase();
+  if (!shopOk) {
+    log("warn", "app_proxy_rejected", { ip: req.ip });
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  if (!v.customerId) return res.json({ loggedIn: false, orders: [] });
+  try {
+    const nodes = await fetchOrderNodes(`customer_id:${v.customerId}`, 10);
+    const orders = nodes.map(orderFromNode).filter(Boolean).map(publicOrderStatus);
+    log("info", "app_proxy_orders", { count: orders.length });
+    res.json({ loggedIn: true, orders });
+  } catch (err) {
+    log("error", "app_proxy_orders_failed", { message: err.message });
+    res.status(500).json({ error: "Order lookup failed" });
+  }
+});
+
 // Raw-body HMAC check shared by the chat service's signed routes.
 function signedChatBody(req) {
   const raw = Buffer.isBuffer(req.body) ? req.body : null;
@@ -3581,7 +3605,7 @@ async function handleOrderStatus(req, res) {
   if (!num || !contact || contact.length > 254) return res.status(400).json({ error: "Invalid request" });
   if (!process.env.SHOPIFY_SHOP_DOMAIN) return res.status(503).json({ error: "Shopify not configured" });
   try {
-    const result = orderStatusResult(await fetchOrderNodes(`name:#${num}`, 1), contact);
+    const result = orderStatusResult(await fetchOrderNodes(orderNameQuery(num), 5), contact, num);
     log("info", "order_status_lookup", { found: result.found });
     res.json(result);
   } catch (err) {

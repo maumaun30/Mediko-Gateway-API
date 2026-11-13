@@ -71,3 +71,11 @@ test('orderStatusResult: found only when the contact matches; same answer for mi
   assert.deepEqual(orderStatusResult([], 'maria@example.ph'), { found: false })
   assert.equal(JSON.stringify(ok).includes('maria'), false)
 })
+
+test('orderNameQuery searches with and without "#"; pickOrder needs an exact number match', () => {
+  const { orderNameQuery, pickOrder } = require('../lib/orders')
+  assert.equal(orderNameQuery('1002'), 'name:"#1002" OR name:"1002"')
+  assert.equal(pickOrder([{ name: '#10021' }, { name: '#1002' }], '1002').name, '#1002')
+  assert.equal(pickOrder([{ name: '#10021' }], '1002'), null)
+  assert.equal(pickOrder([], '1002'), null)
+})
