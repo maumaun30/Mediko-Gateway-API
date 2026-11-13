@@ -14,6 +14,7 @@ const {
   productHandleFromUrl, productToPreview,
 } = require("./lib/chat");
 const { isAccessDenied } = require("./lib/shopify");
+const { ORDER_FIELDS, normalizeOrderNumber, orderFromNode, contactMatches, publicOrderStatus, statusReply } = require("./lib/orders");
 
 const app = express();
 app.set("trust proxy", 1);
@@ -3427,6 +3428,47 @@ app.get("/api/chat/customer", requireAdmin, async (req, res) => {
   } catch (err) {
     log("error", "chat_customer_lookup_failed", { message: err.message });
     res.status(500).json({ error: "Customer lookup failed" });
+  }
+});
+
+// ── Orders for live chat ──────────────────────────────────────────────────────
+// Raw Admin API order nodes (contact fields included, for verification only).
+async function fetchOrderNodes(q, first) {
+  const data = await shopifyGraphQL(
+    `query ChatOrders($q: String!, $first: Int!) {
+       orders(first: $first, query: $q, sortKey: CREATED_AT, reverse: true) { nodes { ${ORDER_FIELDS} } }
+     }`,
+    { q, first },
+  );
+  return (data && data.orders && data.orders.nodes) || [];
+}
+const panelOrder = (n) => { const o = orderFromNode(n); return o && { ...o, state: publicOrderStatus(o).state, reply: statusReply(o) }; };
+
+// Agent panel: the chat customer's recent orders (by email).
+app.get("/api/chat/orders", requireAdmin, async (req, res) => {
+  const email = typeof req.query.email === "string" ? req.query.email.trim() : "";
+  if (!email || email.length > 254 || !EMAIL_LIST_RE.test(email)) return res.status(400).json({ error: "Valid email required" });
+  if (!process.env.SHOPIFY_SHOP_DOMAIN) return res.status(503).json({ error: "Shopify not configured" });
+  try {
+    const nodes = await fetchOrderNodes(`email:"${sanitizeSearchTerm(email)}"`, 5);
+    res.json({ orders: nodes.map(panelOrder).filter(Boolean) });
+  } catch (err) {
+    log("error", "chat_orders_failed", { message: err.message });
+    res.status(500).json({ error: "Order lookup failed" });
+  }
+});
+
+// Agent panel: an order number the customer mentioned (may not be theirs).
+app.get("/api/chat/order", requireAdmin, async (req, res) => {
+  const num = normalizeOrderNumber(req.query.number);
+  if (!num) return res.status(400).json({ error: "Order number required" });
+  if (!process.env.SHOPIFY_SHOP_DOMAIN) return res.status(503).json({ error: "Shopify not configured" });
+  try {
+    const [node] = await fetchOrderNodes(`name:#${num}`, 1);
+    res.json({ order: node ? panelOrder(node) : null });
+  } catch (err) {
+    log("error", "chat_order_failed", { message: err.message });
+    res.status(500).json({ error: "Order lookup failed" });
   }
 });
 
