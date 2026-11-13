@@ -16,6 +16,7 @@ function harness({ tokens = ['t1', 't2', 't3', 't4'], backoffMs } = {}) {
     close() { this.onclose?.() }
   }
   const conn = createChatConnection({
+    random: () => 0.5, // no jitter: exact backoff values
     getToken: async () => ({ token: tokens[i++], apiUrl: 'https://chat.test' }),
     WebSocketImpl: FakeWS,
     onEvent: (e) => events.push(e),
@@ -199,4 +200,16 @@ test('reply tracker: confirm by clientId, timeout, failAll, isPending', () => {
   assert.equal(r.confirm(b), null, 'late echo after timeout resolves nothing')
   assert.deepEqual(r.failAll().map((p) => p.clientId), [c])
   assert.equal(r.size, 0)
+})
+
+test('reconnect delay has ±20% jitter', async () => {
+  for (const [r, want] of [[0, 800], [1, 1200], [0.5, 1000]]) {
+    const sockets = []; let delay
+    class FakeWS { constructor(url) { this.url = url; sockets.push(this) } send() {} close() { this.onclose?.() } }
+    createChatConnection({ getToken: async () => ({ token: 't', apiUrl: 'https://c.test' }), WebSocketImpl: FakeWS,
+      random: () => r, setTimer: (f, ms) => { delay = ms }, setPingTimer: () => {} })
+    await new Promise(res => setImmediate(res))
+    sockets[0].onclose?.()
+    assert.equal(delay, want)
+  }
 })

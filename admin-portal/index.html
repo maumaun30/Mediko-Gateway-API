@@ -2244,7 +2244,7 @@
       if (!email) return;
       let html;
       try {
-        const r = await api(`/api/chat/customer?email=${encodeURIComponent(email)}`);
+        const r = await cachedApi(`/api/chat/customer?email=${encodeURIComponent(email)}`);
         const cu = r.customer;
         if (!cu) html = '<s-text color="subdued">No Shopify customer with this email.</s-text>';
         else {
@@ -2256,6 +2256,17 @@
       }
       const host = byId('chat-shopify');
       if (host && st.selected === id) host.innerHTML = `<s-stack gap="small-200">${html}</s-stack>`;
+    }
+
+    // Shopify lookups for the details pane are cached for a minute: opening a chat
+    // renders the pane twice, and switching back and forth shouldn't re-query.
+    const lookupCache = new Map(); // url → { at, promise }
+    function cachedApi(url, ttlMs = 60000) {
+      const hit = lookupCache.get(url);
+      if (hit && Date.now() - hit.at < ttlMs) return hit.promise;
+      const promise = api(url).catch((err) => { lookupCache.delete(url); throw err; });
+      lookupCache.set(url, { at: Date.now(), promise });
+      return promise;
     }
 
     // ── Orders (details pane) ──
@@ -2300,9 +2311,9 @@
       const mentioned = mentionedOrderNumber();
       let list = [], extra = null, err = null;
       try {
-        if (email) list = (await api(`/api/chat/orders?email=${encodeURIComponent(email)}`)).orders || [];
+        if (email) list = (await cachedApi(`/api/chat/orders?email=${encodeURIComponent(email)}`)).orders || [];
         const inList = mentioned && list.some((o) => String(o.name).replace(/\D/g, '') === mentioned);
-        if (mentioned && !inList) extra = (await api(`/api/chat/order?number=${encodeURIComponent(mentioned)}`)).order || null;
+        if (mentioned && !inList) extra = (await cachedApi(`/api/chat/order?number=${encodeURIComponent(mentioned)}`)).order || null;
       } catch (e) { err = e; }
       const box = byId('chat-orders');
       if (!box || st.selected !== id) return;

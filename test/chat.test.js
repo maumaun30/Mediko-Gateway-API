@@ -117,3 +117,14 @@ test('index.js never logs a raw chat sessionId or link', () => {
   }
   assert.ok(logs.some((l) => l.includes('chat_event_received') && l.includes('maskId(event.sessionId)')))
 })
+
+test('createReplayGuard: a signature is accepted once within its window', () => {
+  const { createReplayGuard } = require('../lib/chat')
+  let t = 0
+  const g = createReplayGuard({ ttlMs: 1000, now: () => t })
+  assert.equal(g.firstTime('aa'), true)
+  assert.equal(g.firstTime('aa'), false)
+  assert.equal(g.firstTime('bb'), true)
+  t = 1001
+  assert.equal(g.firstTime('aa'), true)
+})
