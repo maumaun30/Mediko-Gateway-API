@@ -107,8 +107,10 @@ test('maskId and redactPath keep chat session ids out of logs', () => {
   assert.equal(redactPath('/api/inbox/counts'), '/api/inbox/counts')
 })
 
-test('index.js never logs a raw chat sessionId or link', () => {
-  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8')
+test('server code never logs a raw chat sessionId or link', () => {
+  const fs = require('fs'), path = require('path'), root = path.join(__dirname, '..')
+  const files = ['index.js', ...['lib', 'routes'].filter((d) => fs.existsSync(path.join(root, d))).flatMap((d) => fs.readdirSync(path.join(root, d)).filter((f) => f.endsWith('.js')).map((f) => `${d}/${f}`))]
+  const src = files.map((f) => fs.readFileSync(path.join(root, f), 'utf8')).join('\n')
   const logs = src.match(/log\(\s*"[a-z]+",\s*"[a-z_]+",[^\n]*/g) || []
   for (const line of logs) {
     assert.ok(!/sessionId:\s*event\.sessionId/.test(line), line)
