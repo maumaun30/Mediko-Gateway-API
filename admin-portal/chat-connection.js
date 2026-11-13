@@ -18,6 +18,7 @@
 
   function createChatConnection({
     getToken,
+    random = Math.random,   // ±20 % jitter so agent tabs don't reconnect in lockstep
     WebSocketImpl = typeof WebSocket !== 'undefined' ? WebSocket : undefined,
     onEvent = () => {},
     onStatus = () => {},
@@ -38,7 +39,8 @@
       if (stopped) return;
       open = false;
       onStatus('offline');
-      const wait = backoffMs[Math.min(attempt, backoffMs.length - 1)];
+      const base = backoffMs[Math.min(attempt, backoffMs.length - 1)];
+      const wait = Math.round(base * (0.8 + 0.4 * random()));
       attempt += 1;
       setTimer(connect, wait);
     }
