@@ -11,10 +11,11 @@ const rateLimit = require("express-rate-limit");
 const jwt = require("jsonwebtoken");
 const {
   verifyChatEventSignature, chatDeepLink, buildStaffAlertMail, validateChatEvent, maskId, redactPath, legacyChatRedirect,
-  productHandleFromUrl, productToPreview,
+  productHandleFromUrl, productToPreview, createReplayGuard,
 } = require("./lib/chat");
 const { isAccessDenied, verifyAppProxy } = require("./lib/shopify");
 const { applicationAdminMail, contactAdminMail, returnAdminMail } = require("./lib/adminEmail");
+const { templateHtml } = require("./lib/emailFormat");
 const { orderNameQuery, pickOrder, orderStatusResult, ORDER_FIELDS, normalizeOrderNumber, orderFromNode, contactMatches, publicOrderStatus, statusReply } = require("./lib/orders");
 
 const app = express();
@@ -1820,15 +1821,7 @@ function fillTemplate(text, vars, keep = []) {
   return withOptional.replace(/\{\{\s*(\w+)\s*\}\}/g, (m, k) => (keep.includes(k) ? m : val(k)));
 }
 
-// Plain text → simple HTML email.
-function templateHtml(text) {
-  const paras = escapeHtml(text.trim())
-    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-    .split(/\n{2,}/)
-    .map((p) => `<p style="margin: 0 0 16px 0;">${p.trim().replace(/\n/g, "<br>")}</p>`)
-    .join("");
-  return `<div style="font-family: sans-serif; line-height: 1.6; color: #333; max-width: 600px;">${paras}</div>`;
-}
+// Plain text → simple HTML email: lib/emailFormat.js (paragraphs, **bold**, clickable https links).
 
 function renderEmail(key, vars, override = {}) {
   const t = getTemplate(key);
@@ -3344,6 +3337,10 @@ app.post("/api/chat/agent-token", requireAdmin, (req, res) => {
   if (!chatSecretOk() || !process.env.CHAT_API_URL) {
     return res.status(503).json({ error: "Chat service not configured" });
   }
+  if (!req.admin || req.admin.sub == null || req.admin.sub === "") {
+    log("error", "chat_agent_token_no_sub");
+    return res.status(500).json({ error: "Your Shopify session has no staff id. Reload the app." });
+  }
   try {
     const token = jwt.sign({}, process.env.CHAT_AGENT_SECRET, {
       algorithm: "HS256",
@@ -3574,6 +3571,8 @@ async function handleOrderStatus(req, res) {
   }
 }
 
+const chatEventReplays = createReplayGuard();
+
 function handleChatEvent(req, res) {
   if (!chatSecretOk()) return res.status(503).json({ error: "Chat not configured" });
   const raw = Buffer.isBuffer(req.body) ? req.body : null;
@@ -3597,6 +3596,10 @@ function handleChatEvent(req, res) {
   }
   if (!validateChatEvent(event)) {
     return res.status(400).json({ error: "Invalid event" });
+  }
+  if (!chatEventReplays.firstTime(String(req.get("x-mediko-signature")))) {
+    log("warn", "chat_event_replayed", { type: event.type });
+    return res.status(202).json({ ok: true });
   }
   res.status(202).json({ ok: true });
   log("info", "chat_event_received", { type: event.type, sessionId: maskId(event.sessionId) });
