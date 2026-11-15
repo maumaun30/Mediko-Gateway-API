@@ -4,7 +4,7 @@ const { queryAsync } = require("../lib/db");
 const { log } = require("../lib/log");
 const { adminName } = require("../lib/settings");
 const { toSmsText } = require("../lib/smsText");
-const { DECISION_RECORDS, TEMPLATES, fillTemplate, getTemplate, loadTemplates, recordVars, validateTemplateInput } = require("../lib/templates");
+const { DECISION_RECORDS, TEMPLATES, fillTemplate, getTemplate, isTemplateEnabled, loadTemplates, recordVars, setTemplateEnabled, validateTemplateInput } = require("../lib/templates");
 
 module.exports = function register(app) {
   app.get("/api/templates", requireAdmin, (_req, res) => {
@@ -14,6 +14,7 @@ module.exports = function register(app) {
         return {
           key, group: def.group, name: def.name, channel: def.channel, vars: def.vars,
           subject: t.subject, body: t.body, saved: t.saved,
+          enabled: def.channel === "email" ? isTemplateEnabled(key) : true,
           defaultSubject: def.subject || null, defaultBody: def.body,
         };
       }),
@@ -47,6 +48,21 @@ module.exports = function register(app) {
     } catch (err) {
       log("error", "templates_save_failed", { message: err.message });
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Switch a customer email on/off (off = not sent; the admin copy of a form still goes).
+  app.put("/api/templates/:key/enabled", requireAdmin, async (req, res) => {
+    const def = TEMPLATES[req.params.key];
+    if (!def || def.channel !== "email") return res.status(404).json({ error: "Unknown email template." });
+    if (typeof req.body?.enabled !== "boolean") return res.status(400).json({ error: "enabled must be true or false." });
+    try {
+      await setTemplateEnabled(req.params.key, req.body.enabled, adminName(req));
+      log("info", "template_switched", { template: req.params.key, enabled: req.body.enabled, by: adminName(req) });
+      res.json({ key: req.params.key, enabled: req.body.enabled });
+    } catch (err) {
+      log("error", "template_switch_failed", { template: req.params.key, message: err.message });
+      res.status(500).json({ error: "Could not save." });
     }
   });
 

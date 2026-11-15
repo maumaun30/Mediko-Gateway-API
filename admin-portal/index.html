@@ -1613,12 +1613,17 @@
     const { templates } = await api('/api/templates');
     const loaded = Object.fromEntries(templates.map((t) => [t.key, { subject: t.subject, body: t.body }]));
     const groups = [...new Set(templates.map((t) => t.group))];
+    // One tab per group (remembered in the URL), so the page isn't one long scroll.
+    const wantTab = new URLSearchParams(location.search).get('tab');
+    let active = groups.includes(wantTab) ? wantTab : groups[0];
 
     const card = (t) => `<s-section heading="${esc(t.name)}">
       <s-stack gap="base">
         <s-stack direction="inline" gap="small" alignItems="center">
           <s-badge tone="${t.channel === 'sms' ? 'info' : 'neutral'}">${t.channel === 'sms' ? 'SMS' : 'Email'}</s-badge>
           <s-badge tone="${t.saved ? 'success' : 'neutral'}">${t.saved ? 'Edited' : 'Default'}</s-badge>
+          ${t.channel === 'email' ? `<s-badge tone="${t.enabled ? 'success' : 'critical'}">${t.enabled ? 'On' : 'Off: not sent'}</s-badge>
+          <s-button variant="tertiary" data-switch="${t.key}" data-enabled="${t.enabled ? '1' : '0'}">${t.enabled ? 'Turn off' : 'Turn on'}</s-button>` : ''}
           ${t.saved ? `<s-button variant="tertiary" data-reset="${t.key}" data-name="${esc(t.name)}">Reset to default</s-button>` : ''}
         </s-stack>
         ${t.channel === 'email' ? `<s-text-field id="tpl-subject-${t.key}" label="Subject" value="${esc(t.subject)}" maxLength="200"></s-text-field>` : ''}
@@ -1646,7 +1651,11 @@
           In emails, a blank line starts a new paragraph and <s-text type="strong">**text**</s-text> is bold.
           Staff can still adjust the wording for one customer in the approve/reject dialog.
         </s-banner>
-        ${groups.map((g) => `<s-heading>${esc(g)}</s-heading>${templates.filter((t) => t.group === g).map(card).join('')}`).join('')}
+        <s-stack direction="inline" gap="small-200" id="tpl-tabs">
+          ${groups.map((g) => `<s-button data-tab="${esc(g)}" variant="${g === active ? 'primary' : 'secondary'}">${esc(g)}</s-button>`).join('')}
+        </s-stack>
+        ${groups.map((g) => `<div data-panel="${esc(g)}" ${g === active ? '' : 'hidden'}><s-stack gap="base">${templates.filter((t) => t.group === g).map(card).join('')}</s-stack></div>`).join('')}
+        <div id="tpl-chat-texts" ${active === 'Chat' ? '' : 'hidden'}></div>
       </s-stack></s-page>
     </form>
     <s-modal id="tpl-reset-modal" heading="Reset to default?">
@@ -1672,6 +1681,29 @@
       if (t.channel === 'email') on(`tpl-subject-${t.key}`, 'input', () => refresh(t));
     });
 
+    // Tabs
+    onAll('[data-tab]', 'click', (e) => {
+      active = e.currentTarget.dataset.tab;
+      document.querySelectorAll('[data-panel]').forEach((el) => { el.hidden = el.dataset.panel !== active; });
+      document.querySelectorAll('[data-tab]').forEach((el) => { el.variant = el.dataset.tab === active ? 'primary' : 'secondary'; });
+      byId('tpl-chat-texts').hidden = active !== 'Chat';
+      history.replaceState(null, '', `${BASE}/templates?tab=${encodeURIComponent(active)}`);
+    });
+
+    // On/Off per email: saved right away (not part of the Save bar).
+    onAll('[data-switch]', 'click', async (e) => {
+      const key = e.currentTarget.dataset.switch;
+      const enabled = e.currentTarget.dataset.enabled !== '1';
+      try {
+        await api(`/api/templates/${key}/enabled`, { method: 'PUT', body: { enabled } });
+        toast(enabled ? 'Email turned on' : 'Email turned off: customers won’t get it');
+        const t = templates.find((x) => x.key === key); if (t) t.enabled = enabled;
+        viewTemplates();
+      } catch (err) { toast(`Couldn’t save: ${err.message}`, true); }
+    });
+
+    loadChatTexts();
+
     const form = byId('tpl-form');
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -1684,10 +1716,15 @@
           changed[t.key] = { body, subject };
         }
       });
-      if (!Object.keys(changed).length) { viewTemplates(); return; }
+      const chatChanges = chatTextsChanges();
+      if (!Object.keys(changed).length && !chatChanges) { viewTemplates(); return; }
       loading(true);
       try {
-        await api('/api/templates', { method: 'PUT', body: { templates: changed } });
+        if (chatChanges) {
+          try { await chatClient.api('/api/agent/settings', { method: 'PUT', body: chatChanges }); }
+          catch (err) { throw new Error(`Chat texts: ${err.message}`); }
+        }
+        if (Object.keys(changed).length) await api('/api/templates', { method: 'PUT', body: { templates: changed } });
         toast('Templates saved');
         viewTemplates();
       } catch (err) {
@@ -1712,6 +1749,39 @@
       try { await api(`/api/templates/${resetKey}`, { method: 'DELETE' }); toast('Template reset'); viewTemplates(); }
       catch (err) { toast(`Couldn’t reset: ${err.message}`, true); }
     });
+  }
+
+  // Templates › Chat: texts customers see in the store chat widget. Stored in the
+  // chat service (/api/agent/settings); blank = the widget's built-in default.
+  let chatTextsLoaded = null; // values shown when the Chat tab loaded; null = not loaded
+  function chatTextsChanges() {
+    if (!chatTextsLoaded || !byId('ct-bubble')) return null;
+    const v = { bubble: String(byId('ct-bubble').value || '').trim(), greeting: String(byId('ct-greeting').value || '').trim(), away: String(byId('ct-away').value || '') };
+    const l = chatTextsLoaded;
+    if (v.bubble === l.bubble && v.greeting === l.greeting && v.away === l.away) return null;
+    return { widgetTexts: { bubble: v.bubble, greeting: v.greeting }, businessHours: { awayMessage: v.away } };
+  }
+  async function loadChatTexts() {
+    chatTextsLoaded = null;
+    const host = byId('tpl-chat-texts');
+    if (!host) return;
+    let data;
+    try { data = await chatClient.api('/api/agent/settings'); }
+    catch (err) {
+      host.innerHTML = `<s-section heading="Chat widget texts"><s-banner tone="warning">${esc(err.status === 503 ? 'Chat service not configured.' : `Couldn’t load: ${err.message}`)}</s-banner></s-section>`;
+      return;
+    }
+    if (!byId('tpl-chat-texts')) return;
+    const w = data.widgetTexts || {};
+    const away = (data.businessHours && data.businessHours.awayMessage) || '';
+    host.innerHTML = `<s-section heading="Chat widget texts">
+      <s-stack gap="base">
+        <s-paragraph color="subdued">What customers see in the store chat. Leave a field blank to use the built-in default. Saved with the Save bar.</s-paragraph>
+        <s-text-field id="ct-bubble" label="Popup bubble (next to the chat button)" maxLength="200" value="${esc(w.bubble || '')}" placeholder="Kumusta po! Paano ko kayo matutulungan ngayon? 😊"></s-text-field>
+        <s-text-area id="ct-greeting" label="Chat greeting (first message in a new chat)" rows="2" maxLength="300" value="${esc(w.greeting || '')}" placeholder="Kumusta po! Paano ko kayo matutulungan ngayon? 😊"></s-text-area>
+        <s-text-area id="ct-away" label="Away message (sent when a customer writes outside office hours)" rows="3" maxLength="1000" value="${esc(away)}"></s-text-area>
+      </s-stack></s-section>`;
+    chatTextsLoaded = { bubble: w.bubble || '', greeting: w.greeting || '', away };
   }
 
   // ── Settings ───────────────────────────────────────────────────────────────
@@ -1911,7 +1981,7 @@
         <div id="chat-week"></div>
         ${bh.timezone ? `<s-text color="subdued">Timezone: <span class="mono">${esc(bh.timezone)}</span></s-text>` : ''}
       </s-stack>
-      <s-text-area id="chat-away" label="Away message" rows="3" maxLength="1000" value="${esc(bh.awayMessage || '')}"></s-text-area>
+      <s-text color="subdued">The away message is edited in Templates › Chat.</s-text>
       <s-number-field id="chat-unanswered" label="Alert when unanswered for (minutes)" min="1" max="240" value="${esc(unanswered)}"></s-number-field>
       <s-stack direction="inline"><s-button id="chat-save" variant="primary">Save chat settings</s-button></s-stack>
     </s-stack>`);
@@ -1920,7 +1990,7 @@
     on('chat-save', 'click', async () => {
       const btn = byId('chat-save');
       readHours();
-      const body = { enabled: Boolean(byId('chat-enabled').checked), awayMessage: String(byId('chat-away').value || ''), hours: {} };
+      const body = { enabled: Boolean(byId('chat-enabled').checked), hours: {} };
       const badDay = openKeys().find((k) => !(HHMM_RE.test(st.start[k]) && HHMM_RE.test(st.end[k]) && st.start[k] < st.end[k]));
       CHAT_DAYS.forEach(([k]) => { body.hours[k] = { open: st.open[k], start: st.start[k], end: st.end[k] }; });
       const errEl = byId('chat-hours-error');
