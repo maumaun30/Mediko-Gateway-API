@@ -453,10 +453,18 @@
     });
   }
 
-  // Shared "Send test SMS" modal (Home + Shipping SMS).
+  // Shared "Send test SMS" modal (Home + Shipping SMS). With an order number the
+  // text uses that real order's courier, tracking number and link (test or
+  // resend); blank uses a sample order.
   function testSmsModal() {
     return `<s-modal id="test-sms-modal" heading="Send test SMS">
       <s-stack gap="base">
+        <s-stack direction="inline" gap="small-200" alignItems="end">
+          <s-text-field id="test-sms-order" label="Order number (optional)" placeholder="#1042"
+            details="Uses this order’s shipment. Blank sends a sample."></s-text-field>
+          <s-button id="test-sms-load">Load order</s-button>
+        </s-stack>
+        <div id="test-sms-preview" hidden></div>
         <s-text-field id="test-sms-number" label="Phone number" placeholder="0917 123 4567" details="Uses 1 credit."></s-text-field>
       </s-stack>
       <s-button slot="primary-action" variant="primary" id="test-sms-send">Send test</s-button>
@@ -464,17 +472,60 @@
     </s-modal>`;
   }
   function wireTestSms(after) {
+    let loaded = null; // { order, customerPhone, ... } for the order number now in the field
+    const orderField = () => byId('test-sms-order');
+    const preview = () => byId('test-sms-preview');
+    const clearPreview = () => { loaded = null; preview().hidden = true; preview().innerHTML = ''; };
+
+    async function loadOrder() {
+      const field = orderField(); field.error = '';
+      const value = String(field.value || '').trim();
+      if (!value) { clearPreview(); return null; }
+      if (loaded && loaded.input === value) return loaded;
+      const btn = byId('test-sms-load'); btn.loading = true;
+      try {
+        const o = await api(`/api/sms/test/order?number=${encodeURIComponent(value)}`);
+        loaded = { ...o, input: value };
+        const p = preview();
+        p.innerHTML = `<s-box padding="base" background="subdued" borderRadius="base"><s-stack gap="small-200">
+            <s-text type="strong">${esc(o.order)}${o.courier ? ` · ${esc(o.courier)}` : ''}</s-text>
+            <s-text>${esc(o.message)}</s-text>
+            <s-text color="subdued">${esc(smsCost(o.message))}${o.link ? '' : ' · no tracking link on this shipment'}</s-text>
+            ${o.customerPhone ? `<s-button id="test-sms-use-customer">Use customer’s number (${esc(fmtPhone(o.customerPhone))})</s-button>`
+              : '<s-text color="subdued">No PH mobile number on this order.</s-text>'}
+          </s-stack></s-box>`;
+        p.hidden = false;
+        on('test-sms-use-customer', 'click', () => { byId('test-sms-number').value = fmtPhone(o.customerPhone); });
+        return loaded;
+      } catch (err) {
+        clearPreview();
+        field.error = err.message;
+        return null;
+      } finally { btn.loading = false; }
+    }
+
+    on('test-sms-load', 'click', () => { loadOrder(); });
+    orderField()?.addEventListener('input', () => { if (loaded) clearPreview(); });
+
     on('test-sms-send', 'click', async (e) => {
       const btn = e.currentTarget; const field = byId('test-sms-number');
       field.error = '';
+      const orderValue = String(orderField().value || '').trim();
+      // Make sure the admin has seen the real text before it goes out.
+      if (orderValue && !(loaded && loaded.input === orderValue)) {
+        if (await loadOrder()) toast('Check the message, then press Send again');
+        return;
+      }
       btn.loading = true;
       try {
-        await api('/api/sms/test', { method: 'POST', body: { number: field.value } });
+        await api('/api/sms/test', { method: 'POST', body: { number: field.value, order: orderValue } });
         hideModal('test-sms-modal');
-        toast(`Text sent to ${fmtPhone(field.value)}`);
+        toast(`Text sent to ${fmtPhone(field.value)}${orderValue ? ` for ${loaded.order}` : ''}`);
         after?.();
       } catch (err) {
-        if (err.status === 400) field.error = err.message; else toast(`Couldn’t send: ${err.message}`, true);
+        if (err.status === 400 || err.status === 404) {
+          if (/order/i.test(err.message)) orderField().error = err.message; else field.error = err.message;
+        } else toast(`Couldn’t send: ${err.message}`, true);
       } finally { btn.loading = false; }
     });
   }
@@ -1591,7 +1642,7 @@
     name: 'Maria Santos', first_name: 'Maria', id_number: 'SC-034-2219', reference_id: '123',
     order: '#MK1028', items: 'Vitamin C 500mg ×2', reason: 'The ID photo is too blurry to read.',
     message: 'Is losartan 50mg available for delivery this week?',
-    courier: 'J&T Express', tracking: '7820 4419 0031', link: 'https://jtexpress.ph/track?no=782044190031',
+    courier: 'J&T Express', tracking: '782044190031', link: 'https://www.jtexpress.ph/appExpressTrack?wayBillNo=782044190031',
   };
   function fillTpl(text, vars, keep = []) {
     const val = (k) => (vars[k] == null ? '' : String(vars[k]));

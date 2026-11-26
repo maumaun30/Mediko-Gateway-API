@@ -4,8 +4,11 @@ const { queryAsync } = require("../lib/db");
 const { publicBaseUrl } = require("../lib/emailBlasts");
 const { log } = require("../lib/log");
 const { adminName } = require("../lib/settings");
+const { fetchOrderNodes } = require("../lib/liveChat");
+const { normalizeOrderNumber, orderNameQuery, pickOrder } = require("../lib/orders");
+const { shopifyConfigured } = require("../lib/shopifyAdmin");
 const { setSetupFlag } = require("../lib/setup");
-const { SMS_ACCOUNT_CACHE_MS, SMS_BLAST_COUNTS_SQL, SMS_BLAST_MAX_RECIPIENTS, _smsAccountCache, buildShippingSms, deliverShippingSms, fillSmsBlast, getSemaphoreAccount, getSmsConfig, normalizePhMobile, normalizeSmsAudience, parseId, resolveSmsAudience, runSmsBlast, runningSmsBlasts, sendSemaphoreSms, validateSmsBlastContent } = require("../lib/sms");
+const { SMS_ACCOUNT_CACHE_MS, SMS_BLAST_COUNTS_SQL, SMS_BLAST_MAX_RECIPIENTS, _smsAccountCache, buildShippingSms, deliverShippingSms, fillSmsBlast, getSemaphoreAccount, getSmsConfig, normalizePhMobile, normalizeSmsAudience, parseId, resolveSmsAudience, runSmsBlast, runningSmsBlasts, sendSemaphoreSms, shippingSmsFromOrder, validateSmsBlastContent } = require("../lib/sms");
 
 module.exports = function register(app) {
   // Read-only status for the SMS tabs. Editing happens in /api/settings; the key
@@ -99,16 +102,59 @@ module.exports = function register(app) {
   });
 
   // Send one test SMS to confirm the key / sender name.
+  // Test / resend: with an order number, the text is built from that real
+  // order's latest shipment (courier, tracking number, tracking link), exactly as
+  // the webhook would. Without one, a sample order is used.
+  // → { order } | { error, status }
+  async function testOrder(raw) {
+    const num = normalizeOrderNumber(raw);
+    if (!num) return { status: 400, error: "Enter an order number like #1042." };
+    if (!shopifyConfigured()) return { status: 503, error: "Shopify is not configured." };
+    const node = pickOrder(await fetchOrderNodes(orderNameQuery(num), 5), num);
+    if (!node) return { status: 404, error: `Order #${num} not found.` };
+    const order = shippingSmsFromOrder(node);
+    if (!order) return { status: 400, error: `Order ${node.name} hasn’t shipped yet.` };
+    return { order };
+  }
+
+  // Preview for the test modal: the text that would be sent, and the
+  // customer's number on the order (so a resend can use it).
+  app.get("/api/sms/test/order", requireAdmin, async (req, res) => {
+    try {
+      const r = await testOrder(req.query.number);
+      if (r.error) return res.status(r.status).json({ error: r.error });
+      const message = buildShippingSms(r.order);
+      res.json({
+        order: r.order.orderName,
+        courier: r.order.company,
+        tracking: r.order.trackingNumber,
+        link: r.order.trackingUrl,
+        customerPhone: r.order.phone,
+        message,
+        length: message.length,
+      });
+    } catch (err) {
+      log("error", "sms_test_order_failed", { message: err.message });
+      res.status(500).json({ error: "Order lookup failed" });
+    }
+  });
+
   app.post("/api/sms/test", requireAdmin, async (req, res) => {
     if (!getSmsConfig().apiKey) return res.status(503).json({ error: "No Semaphore API key set." });
     const number = normalizePhMobile(req.body && req.body.number);
     if (!number) return res.status(400).json({ error: "Enter a valid PH mobile number." });
+    let vars = { orderName: "#TEST", company: "J&T Express", trackingNumber: "000000000" };
+    const orderRaw = req.body && typeof req.body.order === "string" ? req.body.order.trim() : "";
     try {
-      const sent = await sendSemaphoreSms(
-        number,
-        buildShippingSms({ orderName: "#TEST", company: "J&T Express", trackingNumber: "000000000" }),
-      );
-      log("info", "sms_test_sent", { messageId: sent.message_id, ip: req.ip });
+      if (orderRaw) {
+        const r = await testOrder(orderRaw);
+        if (r.error) return res.status(r.status).json({ error: r.error, field: "order" });
+        vars = r.order;
+      }
+      const sent = await sendSemaphoreSms(number, buildShippingSms(vars));
+      log("info", "sms_test_sent", {
+        messageId: sent.message_id, order: orderRaw ? vars.orderName : null, by: adminName(req), ip: req.ip,
+      });
       setSetupFlag("setup_test_sms_sent", true, adminName(req)).catch(() => {});
       res.json({ success: true, messageId: sent.message_id, status: sent.status, sender: sent.sender_name });
     } catch (err) {
