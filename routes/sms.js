@@ -8,7 +8,7 @@ const { fetchOrderNodes } = require("../lib/liveChat");
 const { normalizeOrderNumber, orderNameQuery, pickOrder } = require("../lib/orders");
 const { shopifyConfigured } = require("../lib/shopifyAdmin");
 const { setSetupFlag } = require("../lib/setup");
-const { SMS_ACCOUNT_CACHE_MS, SMS_BLAST_COUNTS_SQL, SMS_BLAST_MAX_RECIPIENTS, _smsAccountCache, buildShippingSms, deliverShippingSms, fillSmsBlast, getSemaphoreAccount, getSmsConfig, normalizePhMobile, normalizeSmsAudience, parseId, resolveSmsAudience, runSmsBlast, runningSmsBlasts, sendSemaphoreSms, shippingSmsFromOrder, validateSmsBlastContent } = require("../lib/sms");
+const { SMS_BLAST_COUNTS_SQL, SMS_BLAST_MAX_RECIPIENTS, buildShippingSms, deliverShippingSms, fillSmsBlast, getSmsAccountCached, getSmsConfig, normalizePhMobile, normalizeSmsAudience, parseId, resolveSmsAudience, runSmsBlast, runningSmsBlasts, sendSemaphoreSms, shippingSmsFromOrder, validateSmsBlastContent } = require("../lib/sms");
 
 module.exports = function register(app) {
   // Read-only status for the SMS tabs. Editing happens in /api/settings; the key
@@ -25,15 +25,9 @@ module.exports = function register(app) {
   });
 
   app.get("/api/sms/account", requireAdmin, async (_req, res) => {
-    const { apiKey } = getSmsConfig();
-    if (!apiKey) return res.status(503).json({ error: "No Semaphore API key set." });
-    const c = _smsAccountCache;
-    if (c.key === apiKey && c.data && Date.now() - c.at < SMS_ACCOUNT_CACHE_MS) return res.json(c.data);
+    if (!getSmsConfig().apiKey) return res.status(503).json({ error: "No Semaphore API key set." });
     try {
-      const a = await getSemaphoreAccount();
-      const data = { accountName: a.account_name, status: a.status, creditBalance: a.credit_balance };
-      _smsAccountCache = { key: apiKey, at: Date.now(), data };
-      res.json(data);
+      res.json(await getSmsAccountCached());
     } catch (err) {
       log("error", "sms_account_failed", { message: err.message });
       res.status(500).json({ error: err.message });
