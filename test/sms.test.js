@@ -234,3 +234,59 @@ test('shippingSmsFromOrder: unshipped orders are null; failed shipments and bad 
   const bare = shippingSmsFromOrder(orderNode({ fulfillments: [{ status: 'SUCCESS', trackingInfo: [] }] }))
   assert.equal(buildShippingSms(bare), 'MedikoPH: Order #1234 has been shipped.')
 })
+
+// ---- Semaphore balance cache (the 429 bug) ----
+
+test('getSmsAccountCached caches, shares one request, and backs off after a 429', async (t) => {
+  const { getSmsAccountCached, _smsAccountCache, SMS_ACCOUNT_CACHE_MS, SMS_ACCOUNT_BACKOFF_MS } = require('../lib/sms')
+  const prevKey = process.env.SEMAPHORE_API_KEY
+  process.env.SEMAPHORE_API_KEY = 'cache-test-key'
+  t.after(() => {
+    if (prevKey === undefined) delete process.env.SEMAPHORE_API_KEY
+    else process.env.SEMAPHORE_API_KEY = prevKey
+  })
+  Object.assign(_smsAccountCache, { key: null, at: 0, data: null, blockedUntil: 0, inflight: null })
+
+  let calls = 0
+  let reply = { status: 200, body: JSON.stringify({ account_name: 'Mediko', status: 'Active', credit_balance: 120 }) }
+  const orig = global.fetch
+  global.fetch = async () => {
+    calls++
+    return { ok: reply.status === 200, status: reply.status, text: async () => reply.body }
+  }
+  t.after(() => { global.fetch = orig })
+
+  const t0 = 1_000_000
+  const [a, b] = await Promise.all([getSmsAccountCached(t0), getSmsAccountCached(t0)])
+  assert.deepEqual(a, { accountName: 'Mediko', status: 'Active', creditBalance: 120 })
+  assert.deepEqual(b, a)
+  assert.equal(calls, 1, 'parallel page loads share one request')
+
+  await getSmsAccountCached(t0 + 1000)
+  assert.equal(calls, 1, 'cached within the window')
+
+  reply = { status: 429, body: 'Too Many Attempts.' }
+  const later = t0 + SMS_ACCOUNT_CACHE_MS + 1
+  assert.deepEqual(await getSmsAccountCached(later), { ...a, stale: true }, '429 serves the last balance')
+  assert.equal(calls, 2)
+  await getSmsAccountCached(later + 1000)
+  assert.equal(calls, 2, 'no new request during the back-off')
+
+  reply = { status: 200, body: JSON.stringify({ account_name: 'Mediko', status: 'Active', credit_balance: 119 }) }
+  const after = later + SMS_ACCOUNT_BACKOFF_MS + 1
+  assert.equal((await getSmsAccountCached(after)).creditBalance, 119)
+  assert.equal(calls, 3)
+})
+
+test('getSmsAccountCached: 429 with no balance yet gives a readable error', async (t) => {
+  const { getSmsAccountCached, _smsAccountCache } = require('../lib/sms')
+  const prevKey = process.env.SEMAPHORE_API_KEY
+  process.env.SEMAPHORE_API_KEY = 'cache-test-key-2'
+  t.after(() => {
+    if (prevKey === undefined) delete process.env.SEMAPHORE_API_KEY
+    else process.env.SEMAPHORE_API_KEY = prevKey
+  })
+  Object.assign(_smsAccountCache, { key: null, at: 0, data: null, blockedUntil: 0, inflight: null })
+  mockFetch(t, { status: 429, body: 'Too Many Attempts.' })
+  await assert.rejects(getSmsAccountCached(), /limiting balance checks/)
+})
